@@ -3,20 +3,20 @@ import * as Location from 'expo-location';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Animated,
-    Dimensions,
-    FlatList,
-    Modal,
-    Platform,
-    RefreshControl,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Animated,
+  Dimensions,
+  FlatList,
+  Modal,
+  Platform,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import PagerView from 'react-native-pager-view';
 // 假設 BusPlannerService 放在 services 資料夾，請依實際位置調整
@@ -25,6 +25,7 @@ import { FavoriteRoute, favoriteRoutesService } from '../components/favoriteRout
 import InstallPWA from '../components/InstallPWA';
 import NotificationSettings from '../components/NotificationSettings';
 import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
+import { compareArrivals } from '../utils/routeSorter';
 
 // 定義 UI 用的介面 (配合新 API 的回傳結構進行適配)
 interface UIArrival {
@@ -270,9 +271,9 @@ export default function StopScreen() {
       // 3. 合併並轉換資料
       const allBuses = allResults.flat().flat();
       
-      // 轉換為 UI 格式並排序 (依據 rawTime，即到站秒數)
+      // 轉換為 UI 格式並排序 (使用共用比較器)
       const uiArrivals: UIArrival[] = allBuses
-        .sort((a, b) => a.rawTime - b.rawTime)
+        .sort((a, b) => compareArrivals(a, b))
         .map((bus) => ({
           route: bus.route,
           estimatedTime: bus.timeText,
@@ -545,22 +546,14 @@ export default function StopScreen() {
         }
       }
 
-      // 轉換 plan() 的結果為 UI 格式
+      // 轉換 plan() 的結果為 UI 格式（先用共用 comparator 排序 plans）
+      plans.sort((a, b) => compareArrivals(a, b));
       const favoriteArrivals: UIArrival[] = plans.map((bus) => ({
         route: bus.routeName,
         direction: bus.directionText || '', // 使用 plan() 提供的方向資訊
         estimatedTime: bus.arrivalTimeText || '更新中',
         key: `fav-${route.id}-${bus.rid}-${bus.routeName}-${bus.rawTime || 0}`,
       }));
-
-      // 依照到站時間排序
-      favoriteArrivals.sort((a, b) => {
-        const timeA = a.estimatedTime || '';
-        const timeB = b.estimatedTime || '';
-        if (timeA.includes('分') && !timeB.includes('分')) return -1;
-        if (!timeA.includes('分') && timeB.includes('分')) return 1;
-        return 0;
-      });
 
       console.log('Total favorite arrivals:', favoriteArrivals.length);
       return favoriteArrivals;
@@ -653,7 +646,8 @@ export default function StopScreen() {
 
       console.log('Matching buses:', matchingBuses.length);
 
-      // 轉換為 UI 格式（使用穩定的 key，加入 rawTime 避免同路線不同班次衝突）
+      // 轉換為 UI 格式（使用共用 comparator 排序 matchingBuses 以確保優先順序）
+      matchingBuses.sort((a, b) => compareArrivals(a, b));
       const favoriteArrivals: UIArrival[] = matchingBuses.map((bus) => ({
         route: bus.route,
         estimatedTime: bus.timeText,
@@ -1294,7 +1288,7 @@ const styles = StyleSheet.create({
   searchBox: { flex: 1 },
   searchInput: {
     height: 46,
-    borderRadius: 10,
+    borderRadius: 50,
     backgroundColor: '#3a4243',
     paddingHorizontal: 16,
     color: '#fff',

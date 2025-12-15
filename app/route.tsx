@@ -1,16 +1,16 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    FlatList,
-    Keyboard,
-    Modal,
-    Platform,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  FlatList,
+  Keyboard,
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 
 import type { BusInfo } from '../components/busPlanner';
@@ -28,6 +28,7 @@ export default function RouteScreen() {
   const router = useRouter();
   const { from, to } = useLocalSearchParams<{ from?: string; to?: string }>();
   const plannerRef = useRef(new BusPlannerService());
+  const searchInputRef = useRef<any>(null);
   
   // 站牌選擇狀態
   const [fromStop, setFromStop] = useState<string>('');
@@ -120,6 +121,25 @@ export default function RouteScreen() {
       );
     }, 250);
   }, [searchQuery]);
+
+  // 在 PWA (standalone) 模式下，autoFocus 可能不會觸發鍵盤，提供 fallback focus
+  useEffect(() => {
+    if (searchMode === null) return;
+    if (Platform.OS !== 'web') return;
+
+    const isStandalone = (typeof window !== 'undefined' && (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)) || ((navigator as any)?.standalone);
+    if (!isStandalone) return;
+
+    const t = setTimeout(() => {
+      try {
+        searchInputRef.current?.focus?.();
+      } catch (e) {
+        // ignore
+      }
+    }, 120);
+
+    return () => clearTimeout(t);
+  }, [searchMode]);
 
   // 規劃路線
   const planRoute = async () => {
@@ -377,13 +397,14 @@ export default function RouteScreen() {
 
         <View style={styles.searchInputContainer}>
           <TextInput
+            ref={searchInputRef}
             placeholder="搜尋站牌"
             placeholderTextColor="#bbb"
             style={styles.searchInput}
             value={searchQuery}
             onChangeText={setSearchQuery}
-            autoFocus={true}
             clearButtonMode="while-editing"
+            autoFocus={true}
           />
         </View>
 

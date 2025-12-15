@@ -115,3 +115,64 @@ export function sortRoutes<T extends SortableRoute>(a: T, b: T): number {
     return aRoute.localeCompare(bRoute, 'zh-TW');
   }
 }
+
+// Arrival comparator: prioritize arriving buses ('進站', '將到', '即將')
+export function compareArrivals(a: any, b: any): number {
+  const TIME_NEAREST = -1; // arriving
+  const TIME_UNKNOWN = 88888; // e.g. HH:MM formats
+  const TIME_NOT_DEPARTED = 99999; // 未發車 / 末班已過 / 今日未營運
+
+  const resolve = (item: any): number => {
+    if (typeof item.rawTime === 'number') return item.rawTime;
+    if (typeof item.raw_time === 'number') return item.raw_time;
+
+    const txt = String(itemText(item) || '').trim();
+    if (!txt) return TIME_NOT_DEPARTED;
+
+    if (/進站|將到|即將/.test(txt)) return TIME_NEAREST;
+    if (/未發車|末班|今日未營運|今日未|未營運/.test(txt)) return TIME_NOT_DEPARTED;
+    if (/交管|交管不停/.test(txt)) return TIME_NOT_DEPARTED;
+    if (txt.includes(':')) return TIME_UNKNOWN;
+
+    const digits = (txt.match(/\d+/) || [])[0];
+    if (!digits) return TIME_NOT_DEPARTED;
+    const val = parseInt(digits, 10);
+    // 如果文字含「分」，視為分鐘，轉成秒；否則視為分鐘也轉（與後端一致）
+    return val * 60;
+  };
+
+  const ra = resolve(a);
+  const rb = resolve(b);
+
+  const ta = String(itemText(a)).trim();
+  const tb = String(itemText(b)).trim();
+
+  // 1) 到站/即將 到站 優先
+  const aIsArriving = /進站|將到|即將/.test(ta) || ra === TIME_NEAREST;
+  const bIsArriving = /進站|將到|即將/.test(tb) || rb === TIME_NEAREST;
+  if (aIsArriving && !bIsArriving) return -1;
+  if (!aIsArriving && bIsArriving) return 1;
+
+  // 2) 未發車/末班/今日未營運/交管等，放到最後
+  const terminalRe = /未發車|末班|今日未營運|今日未|未營運|交管|交管不停/;
+  const aIsTerminal = terminalRe.test(ta) || ra === TIME_NOT_DEPARTED;
+  const bIsTerminal = terminalRe.test(tb) || rb === TIME_NOT_DEPARTED;
+  if (aIsTerminal && !bIsTerminal) return 1;
+  if (!aIsTerminal && bIsTerminal) return -1;
+
+  // 3) 兩者都有數值時間時，數值由小到大
+  const aIsNumeric = ra >= 0 && ra < TIME_UNKNOWN;
+  const bIsNumeric = rb >= 0 && rb < TIME_UNKNOWN;
+  if (aIsNumeric && bIsNumeric) return ra - rb;
+  if (aIsNumeric && !bIsNumeric) return -1;
+  if (!aIsNumeric && bIsNumeric) return 1;
+
+  // 4) 皆為未知或特殊格式時，回落到路線名稱穩定排序
+  const na = String(a.routeName || a.route || '');
+  const nb = String(b.routeName || b.route || '');
+  return na.localeCompare(nb);
+}
+
+function itemText(item: any): string {
+  return item.arrivalTimeText || item.time_text || item.estimatedTime || '';
+}

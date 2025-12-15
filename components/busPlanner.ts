@@ -11,6 +11,7 @@ import * as cheerio from 'cheerio';
 // 若在 Expo 中，請確保這些檔案不會過大導致 Bundle 失敗，否則需改用 expo-file-system 下載
 import routeDataRaw from '../databases/metro_bus_routes.json';
 import stopDataRaw from '../databases/stop_id_map_v3.json';
+import { compareArrivals } from '../utils/routeSorter';
 
 // ========== 類型定義 (參照 busPlanner.ts) ==========
 
@@ -559,8 +560,8 @@ export class BusPlannerService {
         });
     }
 
-    // 5. Sort & Cache
-    finalBuses.sort((a, b) => a.rawTime - b.rawTime);
+    // 5. Sort & Cache (use centralized comparator to ensure arriving items prioritized)
+    finalBuses.sort((a, b) => compareArrivals(a, b));
     
     // Cache without dynamic time
     AsyncStorage.setItem(cacheKey, JSON.stringify(finalBuses)).catch(() => {});
@@ -573,8 +574,8 @@ export class BusPlannerService {
 
     const buses = await this.fetchRealtimeBySlid(slid, stopName); // 或 slid
 
-    // 排序回傳
-    return buses.sort((a, b) => a.raw_time - b.raw_time);
+    // 排序回傳（使用共用比較器，支援不同欄位命名）
+    return buses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async getStopArrivals(stopName: string): Promise<any[]> {
@@ -609,9 +610,9 @@ export class BusPlannerService {
       (task) => this.fetchRealtimeBySlid(task.slid, task.sid)
     );
 
-    // 5. 攤平結果並排序
+    // 5. 攤平結果並排序（使用共用比較器）
     const allBuses = nestedResults.flat();
-    return allBuses.sort((a, b) => a.raw_time - b.raw_time);
+    return allBuses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async updateCachedBuses(cachedBuses: BusInfo[]): Promise<BusInfo[]> {
@@ -646,7 +647,7 @@ export class BusPlannerService {
     });
 
     const result = updatedArrays.flat();
-    result.sort((a, b) => a.rawTime - b.rawTime);
+    result.sort((a, b) => compareArrivals(a, b));
     return result;
   }
 }

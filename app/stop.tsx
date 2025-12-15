@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 // 引入新版 Service
 import { BusPlannerService } from '../components/busPlanner';
-import { sortRoutes } from '../utils/routeSorter';
+import { compareArrivals } from '../utils/routeSorter';
 
 interface UIArrival {
   route: string;
@@ -89,38 +89,62 @@ export default function StopDetailScreen() {
       // 使用函數式更新來獲取最新的 arrivals 狀態
       setArrivals(prev => {
         if (isAutoRefresh && prev.length > 0) {
-          
-          // 自動更新模式：完全替換資料，保留方向資訊
-          // 建立 rid+route 到舊資料的映射（不含 direction，因為去重後不會有重複的 rid-route-time）
-          const existingDataMap = new Map<string, string>();
+
+          // 自動更新模式：合併新/舊資料，避免臨時的未發車/更新中覆蓋已存在的有效時間
+          const TIME_NOT_DEPARTED = 99999;
+          const TIME_UNKNOWN = 88888;
+
+          // 建立 rid+route 到舊資料的映射（包含 direction, rawTime, estimatedTime）
+          const existingDataMap = new Map<string, { direction?: string; rawTime?: number; estimatedTime?: string }>();
           prev.forEach(item => {
-            // 從 key 中提取 rid, route
             const parts = item.key.split('-');
             if (parts.length >= 2) {
               const lookupKey = `${parts[0]}-${parts[1]}`; // rid-route
-              // 保存已載入的方向資訊（可能是終點站或去程/返程）
-              if (item.direction) {
-                existingDataMap.set(lookupKey, item.direction);
-              }
+              existingDataMap.set(lookupKey, {
+                direction: item.direction,
+                rawTime: typeof item.rawTime === 'number' ? item.rawTime : undefined,
+                estimatedTime: item.estimatedTime
+              });
             }
           });
 
-          // 用新資料建立陣列，保留已載入的方向資訊
+          // 若沒有任何新資料，保留舊資料
+          if (!uniqueBuses || uniqueBuses.length === 0) return prev;
+
+          // 用新資料建立陣列，僅在新資料為有效數值或比舊資料更合理時才覆蓋舊資料
           const updated = uniqueBuses.map((bus, index) => {
             const lookupKey = `${bus.rid}-${bus.route}`;
-            const savedDirection = existingDataMap.get(lookupKey);
-            
+            const saved = existingDataMap.get(lookupKey);
+
+            const newRaw = (typeof bus.rawTime === 'number') ? bus.rawTime : (typeof bus.raw_time === 'number' ? bus.raw_time : TIME_NOT_DEPARTED);
+            const newText = bus.timeText || bus.time_text || '';
+
+            const newIsTerminal = newRaw === TIME_NOT_DEPARTED || /未發車|末班|今日未營運|今日未|未營運|交管|交管不停/.test(String(newText));
+            const newIsUnknown = newRaw === TIME_UNKNOWN;
+
+            if (saved && typeof saved.rawTime === 'number' && saved.rawTime < TIME_NOT_DEPARTED && (newIsTerminal || newIsUnknown)) {
+              // 保留舊的有效時間與文字
+              return {
+                route: bus.route,
+                direction: saved.direction || bus.direction || '',
+                estimatedTime: saved.estimatedTime || (newText || '更新中'),
+                key: `${bus.rid}-${bus.route}-${saved.rawTime}-${index}`,
+                rawTime: saved.rawTime,
+              };
+            }
+
+            // 否則使用新的資料（包含 direction）
             return {
               route: bus.route,
-              direction: savedDirection || bus.direction || '', // 保留已載入的方向
-              estimatedTime: bus.timeText,
-              key: `${bus.rid}-${bus.route}-${bus.rawTime}-${index}`,
-              rawTime: bus.rawTime,
+              direction: saved?.direction || bus.direction || '',
+              estimatedTime: newText || '更新中',
+              key: `${bus.rid}-${bus.route}-${newRaw}-${index}`,
+              rawTime: newRaw,
             };
           });
 
-          // 使用統一的排序邏輯
-          return updated.sort(sortRoutes);
+          // 使用統一的比較器排序
+          return updated.sort((a, b) => compareArrivals(a as any, b as any));
         } else {
           // 初始載入模式：先顯示路線名稱和時間，方向欄位暫時為空
           // 注意：新版 BusPlanner 使用 time_text (下劃線格式) 和 direction 欄位
@@ -132,8 +156,8 @@ export default function StopDetailScreen() {
             rawTime: bus.rawTime, // 保留原始時間用於排序
           }));
           
-          // 使用統一的排序邏輯
-          return initialData.sort(sortRoutes);
+          // 使用統一的排序邏輯（到站優先）
+          return initialData.sort((a, b) => compareArrivals(a as any, b as any));
         }
       });
 
@@ -191,7 +215,7 @@ export default function StopDetailScreen() {
             if (!routeEndStationCount.has(item.route)) {
               routeEndStationCount.set(item.route, new Set());
             }
-            routeEndStationCount.get(item.route)!.add(item.direction);
+            routeEndStationCount.get(item.route)!.add(item.direction || '');
           });
           
           // 如果某路線有多個項目指向同一終點站，改用原始方向區分
@@ -231,8 +255,8 @@ export default function StopDetailScreen() {
             }
           });
           
-          // 轉換回陣列並使用統一的排序邏輯
-          return Array.from(finalDeduped.values()).sort(sortRoutes);
+          // 轉換回陣列並使用統一的排序邏輯（到站優先）
+          return Array.from(finalDeduped.values()).sort((a, b) => compareArrivals(a as any, b as any));
         });
       }
 
@@ -282,7 +306,7 @@ export default function StopDetailScreen() {
         <View style={styles.routeInfo}>
           <Text style={styles.route}>{item.route}</Text>
           {item.direction && (
-            <Text style={styles.direction}>{item.direction}</Text>
+            <Text style={styles.direction}>{item.direction || ''}</Text>
           )}
         </View>
         <View style={[styles.badge, { backgroundColor: badgeColor }]}>

@@ -2,6 +2,63 @@
 
 這是一個基於 [Expo](https://expo.dev) 開發的跨平台公車查詢應用，支援 iOS、Android 和 Web (PWA)。
 
+## 全新環境快速啟動指南
+
+1. 安裝 Node.js（建議 LTS 版本）
+   - 前往 [Node.js 官方網站](https://nodejs.org/zh-tw/download/) 下載並安裝 LTS 版本。
+   - Linux 可使用以下指令安裝（以 Ubuntu 為例）：
+     ```bash
+     curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+     sudo apt-get install -y nodejs
+     ```
+   - 安裝完成後可用 `node -v` 和 `npm -v` 檢查版本。
+
+2. 安裝 yarn 或 npm（建議使用 yarn）
+   - yarn 安裝方式：
+     ```bash
+     npm install -g yarn
+     ```
+   - 安裝完成後可用 `yarn -v` 檢查版本。
+   - npm 已隨 Node.js 一同安裝，可直接使用。
+
+3. 安裝 Expo CLI：
+
+   ```bash
+   npm install -g expo-cli
+   ```
+
+4. 進入專案目錄：
+
+   ```bash
+   cd expo-Bus-Route-App
+   ```
+
+5. 安裝依賴：
+
+   ```bash
+   yarn install
+   # 或
+   npm install
+   ```
+
+6. 啟動專案：
+
+   ```bash
+   npx expo start
+   # 或
+   expo start
+   ```
+
+7. 按照終端提示，用手機 Expo Go 掃描 QR code 或在瀏覽器/模擬器打開。
+
+如需 PWA 或 Web 支援，可執行：
+
+```bash
+npx expo start --web
+```
+
+遇到安裝或啟動錯誤，請提供詳細訊息以便協助排查。
+
 ## 功能特色
 
 - 🚏 **即時到站資訊**：查詢台北市公車站牌的即時到站時間
