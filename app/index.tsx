@@ -427,13 +427,10 @@ export default function StopScreen() {
           return tempArrivals;
         });
         
-        // 更新當前顯示的路線（使用最新的 state）
-        setFavoriteRouteArrivals(prev => {
-          // 從最新的 allFavoriteArrivals 中獲取當前索引的資料
-          const updated = allNewArrivals[selectedRouteIndex] || prev;
-          console.log(`🔄 [自動更新] 更新當前顯示路線 (索引: ${selectedRouteIndex}), 資料數: ${prev.length} → ${updated.length}`);
-          return updated;
-        });
+        // 更新當前顯示的路線（直接使用新資料替換舊資料，不保留任何舊數據）
+        setFavoriteRouteArrivals(allNewArrivals[selectedRouteIndex] || []);
+        
+        console.log(`🔄 [自動更新] 更新當前顯示路線 (索引: ${selectedRouteIndex}), 資料數: ${allNewArrivals[selectedRouteIndex]?.length || 0}`);
         
         console.log('✅ [自動更新] 完成所有更新');
       } else {
@@ -459,7 +456,12 @@ export default function StopScreen() {
           tempArrivals[i] = arrivals;
           
           // 即時更新狀態，讓使用者看到已載入的資料
-          setAllFavoriteArrivals([...tempArrivals]);
+          setAllFavoriteArrivals(prevAll => {
+            // 確保完全替換該索引的數據，不保留舊數據
+            const newArrivals = [...(prevAll || [])];
+            newArrivals[i] = arrivals;
+            return newArrivals;
+          });
           
           // 如果這是當前顯示的路線，立即更新顯示
           if (i === selectedRouteIndex) {
@@ -1091,6 +1093,8 @@ export default function StopScreen() {
                   keyExtractor={(item) => item.key}
                   scrollEnabled={true}
                   contentContainerStyle={styles.flatListContent}
+                  extraData={allFavoriteArrivals[index]}
+                  removeClippedSubviews={true}
                 />
               </View>
             ))}
@@ -1130,6 +1134,8 @@ export default function StopScreen() {
                   <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
                 ) : undefined
               }
+              extraData={arrivals}
+              removeClippedSubviews={true}
               ListEmptyComponent={
                 <View style={styles.empty}>
                   <Text style={styles.emptyText}>目前無公車資訊</Text>
