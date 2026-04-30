@@ -53,7 +53,7 @@
 
 ### 應用介面預覽
 
-![應用介面](assets/images/demo.png)
+<img src="assets/images/demo.png" alt="應用介面" width="400">
 
 *圖: 應用主頁面和站牌詳情頁面展示*
 
