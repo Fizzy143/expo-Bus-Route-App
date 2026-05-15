@@ -70,6 +70,13 @@ export default function Layout() {
           }}
         />
         <Stack.Screen 
+          name="bus-route" 
+          options={{
+            animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',
+            animationDuration: Platform.OS === 'web' ? 200 : 250,
+          }}
+        />
+        <Stack.Screen 
           name="stop" 
           options={{
             animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',

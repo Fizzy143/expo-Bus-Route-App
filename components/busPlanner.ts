@@ -1,19 +1,19 @@
 /**
  * BusPlannerService.ts
- * 移植自 busPlanner.py (Refactored Version)
+ * 蝘餅???busPlanner.py (Refactored Version)
  * Environment: React Native (Expo SDK 54+) / Node 20+
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as cheerio from 'cheerio';
 
-// 假設這兩個 JSON 檔案位於專案結構中正確的位置
-// 若在 Expo 中，請確保這些檔案不會過大導致 Bundle 失敗，否則需改用 expo-file-system 下載
+// ?身???JSON 瑼?雿撠?蝯?銝剜迤蝣箇?雿蔭
+// ?亙 Expo 銝哨?隢Ⅱ靽?瑼?銝??之撠 Bundle 憭望?嚗???寧 expo-file-system 銝?
 import routeDataRaw from '../databases/metro_bus_routes.json';
 import stopDataRaw from '../databases/stop_id_map_v3.json';
 import { compareArrivals } from '../utils/routeSorter';
 
-// ========== 類型定義 (參照 busPlanner.ts) ==========
+// ========== 憿?摰儔 (? busPlanner.ts) ==========
 
 export interface GeoLocation {
   lat: number;
@@ -30,18 +30,39 @@ export interface StopInfo {
 export interface BusInfo {
   routeName: string;
   rid: string;
-  sid: string; // 候車所在的站點 ID
+  sid: string; // ????函?蝡? ID
   arrivalTimeText: string;
-  rawTime: number; // 用於排序
+  rawTime: number; // ?冽??
   directionText: string;
   stopCount: number;
-  estimatedDuration?: number; // 預估搭乘時間（分鐘）
+  estimatedDuration?: number; // ?摯?凋???嚗???
   startGeo?: GeoLocation;
   endGeo?: GeoLocation;
   pathStops: StopInfo[];
 }
 
-// 用於靜態路線匹配的中介結構
+export interface RouteStopArrival {
+  sid: string;
+  slid?: string;
+  name: string;
+  etaText: string;
+  rawTime: number;
+}
+
+export interface RouteDirectionDetails {
+  routeName: string;
+  rid: string;
+  direction: number;
+  directionText: string;
+  stops: RouteStopArrival[];
+}
+
+export interface RouteDetails {
+  routeName: string;
+  directions: RouteDirectionDetails[];
+}
+
+// ?冽??頝舐??寥??葉隞?瑽?
 interface StaticRouteMatch {
   route_name: string;
   rid: string;
@@ -50,15 +71,56 @@ interface StaticRouteMatch {
   match_range: [number, number]; // [startIndex, endIndex]
 }
 
-// ========== 配置與常數 ==========
+interface TaipeiEstimateRow {
+  RouteID?: string | number;
+  StopID?: string | number;
+  EstimateTime?: string | number | null;
+  GoBack?: string | number | null;
+  [key: string]: string | number | null | undefined;
+}
+
+interface TaipeiRouteRow {
+  Id?: string | number;
+  nameZh?: string;
+  aliasName?: string;
+  pathAttributeName?: string;
+  departureZh?: string;
+  destinationZh?: string;
+  [key: string]: string | number | null | undefined;
+}
+
+interface TaipeiStopRow {
+  Id?: string | number;
+  routeId?: string | number;
+  nameZh?: string;
+  seqNo?: string | number;
+  goBack?: string | number;
+  stopLocationId?: string | number;
+  [key: string]: string | number | null | undefined;
+}
+
+interface CachedTaipeiRouteStopMapping {
+  officialRouteId: string;
+  stopIdByLocalSid: Record<string, string>;
+  estimateRouteId?: string;
+}
+
+
+// ========== ?蔭?虜??==========
 
 const CONFIG = {
-  // 使用 Python 版的 Proxy 設定
+  // 雿輻 Python ?? Proxy 閮剖?
   BASE_URL: "https://api.codetabs.com/v1/proxy?quest=https://pda5284.gov.taipei/MQS",
+  TAIPEI_ESTIMATE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetEstimateTime.gz',
+  TAIPEI_ROUTE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz',
+  TAIPEI_STOP_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetStop.gz',
   USER_AGENT: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
   TIMEOUT_MS: 15000,
-  MAX_CONCURRENT_REQUESTS: 5,
+  MAX_CONCURRENT_REQUESTS: 10,
   CACHE_KEY_PREFIX: "BUS_ROUTE_CACHE_V2_",
+  TAIPEI_ROUTE_STOP_MAPPING_CACHE_PREFIX: 'TAIPEI_ROUTE_STOP_MAPPING_V3_',
+  REALTIME_CACHE_TTL_MS: 15000,
+  STATIC_CACHE_TTL_MS: 12 * 60 * 60 * 1000,
   
   // Magic Numbers
   TIME_NEAREST: -1,
@@ -68,28 +130,35 @@ const CONFIG = {
 };
 
 enum BusStatus {
-  ARRIVING = '進站中',
-  NOT_DEPARTED = '未發車',
-  TRAFFIC_CONTROL = '交管不停',
-  LAST_PASSED = '末班已過',
-  NOT_OPERATING = '今日未營運',
-  UNKNOWN = '未知'
+  ARRIVING = '\u9032\u7ad9\u4e2d',
+  NOT_DEPARTED = '\u672a\u767c\u8eca',
+  TRAFFIC_CONTROL = '\u4ea4\u901a\u7ba1\u5236',
+  LAST_PASSED = '\u672b\u73ed\u5df2\u904e',
+  NOT_OPERATING = '\u672a\u71df\u904b',
+  UNKNOWN = '\u66ab\u7121\u8cc7\u6599'
 }
-
-// ========== 工具類 ==========
 
 class TimeParser {
   static parseTextToSeconds(text: string): number {
     const t = text.trim();
-    if (t.includes("進站") || t.includes("將到")) return CONFIG.TIME_NEAREST;
-    if (t.includes("未發車") || t.includes("末班") || t.includes("今日未")) return CONFIG.TIME_NOT_DEPARTED;
-    if (t.includes(":")) return CONFIG.TIME_UNKNOWN;
+    if (!t) return CONFIG.TIME_NOT_DEPARTED;
+    if (t.includes(BusStatus.ARRIVING) || t.includes('\u5373\u5c07\u5230\u7ad9')) {
+      return CONFIG.TIME_NEAREST;
+    }
+    if (
+      t.includes(BusStatus.NOT_DEPARTED) ||
+      t.includes(BusStatus.LAST_PASSED) ||
+      t.includes(BusStatus.NOT_OPERATING)
+    ) {
+      return CONFIG.TIME_NOT_DEPARTED;
+    }
+    if (t.includes(':')) return CONFIG.TIME_UNKNOWN;
 
     const digits = t.replace(/\D/g, '');
     if (!digits) return CONFIG.TIME_NOT_DEPARTED;
-    
-    const val = parseInt(digits, 10);
-    return t.includes("分") ? val * 60 : val;
+
+    const value = parseInt(digits, 10);
+    return t.includes('\u5206') ? value * 60 : value;
   }
 
   static formatStatusCode(code: string): string {
@@ -97,35 +166,31 @@ class TimeParser {
     const mapping: Record<string, string> = {
       '0': BusStatus.ARRIVING,
       '': BusStatus.NOT_DEPARTED,
-      '-1': BusStatus.NOT_DEPARTED, // Python版邏輯：負數視為未發車或異常，除了特定狀態
+      '-1': BusStatus.NOT_DEPARTED,
       '-2': BusStatus.TRAFFIC_CONTROL,
       '-3': BusStatus.LAST_PASSED,
-      '-4': BusStatus.NOT_OPERATING
+      '-4': BusStatus.NOT_OPERATING,
     };
 
     if (mapping[codeStr]) return mapping[codeStr];
-    
-    // 若原本就是 "12:30" 格式
+
     if (codeStr.includes(':') || Object.values(BusStatus).includes(codeStr as any)) {
-        return codeStr;
+      return codeStr;
     }
 
-    try {
-      const secs = parseInt(codeStr, 10);
-      if (isNaN(secs)) return BusStatus.UNKNOWN;
-      if (secs < 0) return BusStatus.NOT_DEPARTED;
-      if (secs < 180) return "將到站";
-      return `${Math.floor(secs / 60)}分`;
-    } catch {
-      return BusStatus.NOT_DEPARTED;
-    }
+    const seconds = parseInt(codeStr, 10);
+    if (isNaN(seconds)) return BusStatus.UNKNOWN;
+    if (seconds < 0) return BusStatus.NOT_DEPARTED;
+    if (seconds < 180) return '\u5373\u5c07\u5230\u7ad9';
+
+    return `${Math.floor(seconds / 60)}\u5206`;
   }
 }
 
-// ========== 核心服務 ==========
+// ========== ?詨??? ==========
 
 export class BusPlannerService {
-  // 資料庫結構映射 stop_id_map_v3.json
+  // 鞈?摨怎?瑽?撠?stop_id_map_v3.json
   private stopDb: {
     g: number[][]; // Geo Pool
     n: Record<string, string[]>; // Name Index
@@ -133,12 +198,609 @@ export class BusPlannerService {
   };
 
   private routeDb: any[]; // metro_bus_routes.json
+  private realtimeCache = new Map<string, { expiresAt: number; data: any[] }>();
+  private realtimeInFlight = new Map<string, Promise<any[]>>();
+  private taipeiEstimateCache: { expiresAt: number; data: TaipeiEstimateRow[] } | null = null;
+  private taipeiEstimateInFlight: Promise<TaipeiEstimateRow[]> | null = null;
+  private taipeiRouteCache: { expiresAt: number; data: TaipeiRouteRow[] } | null = null;
+  private taipeiRouteInFlight: Promise<TaipeiRouteRow[]> | null = null;
+  private taipeiStopCache: { expiresAt: number; data: TaipeiStopRow[] } | null = null;
+  private taipeiStopInFlight: Promise<TaipeiStopRow[]> | null = null;
 
   constructor() {
-    // 在 React Native 中，JSON import 是同步的，無需非同步初始化
-    // 類型斷言以符合資料結構
+    // ??React Native 銝哨?JSON import ?臬?甇亦?嚗???甇亙?憪?
+    // 憿??瑁?隞亦泵????瑽?
     this.stopDb = stopDataRaw as any;
     this.routeDb = routeDataRaw as any[];
+  }
+
+  private getRealtimeCacheKey(slid: string, repSid: string): string {
+    return `${slid}:${repSid}`;
+  }
+
+  private async fetchRealtimeBySlidCached(slid: string, repSid: string): Promise<any[]> {
+    const cacheKey = this.getRealtimeCacheKey(slid, repSid);
+    const now = Date.now();
+    const cached = this.realtimeCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+
+    const existingRequest = this.realtimeInFlight.get(cacheKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = this.fetchRealtimeBySlid(slid, repSid)
+      .then(data => {
+        this.realtimeCache.set(cacheKey, {
+          expiresAt: Date.now() + CONFIG.REALTIME_CACHE_TTL_MS,
+          data,
+        });
+        return data;
+      })
+      .finally(() => {
+        this.realtimeInFlight.delete(cacheKey);
+      });
+
+    this.realtimeInFlight.set(cacheKey, request);
+    return request;
+  }
+
+  private isWebEstimateSourceAvailable(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof DecompressionStream !== 'undefined' &&
+      typeof Response !== 'undefined'
+    );
+  }
+
+  private async decompressGzipToText(buffer: ArrayBuffer): Promise<string> {
+    const stream = new Blob([buffer]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(stream).text();
+  }
+
+  private parseTaipeiEstimatePayload(text: string): TaipeiEstimateRow[] {
+    const trimmed = text.replace(/^\uFEFF/, '').trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return parsed as TaipeiEstimateRow[];
+    }
+
+    if (Array.isArray(parsed?.BusInfo)) {
+      return parsed.BusInfo as TaipeiEstimateRow[];
+    }
+
+    if (Array.isArray(parsed?.data)) {
+      return parsed.data as TaipeiEstimateRow[];
+    }
+
+    return [];
+  }
+
+  private getEstimateField(
+    row: TaipeiEstimateRow,
+    candidates: string[]
+  ): string | number | null | undefined {
+    for (const candidate of candidates) {
+      if (candidate in row) {
+        return row[candidate];
+      }
+
+      const matchedKey = Object.keys(row).find(key => key.toLowerCase() === candidate.toLowerCase());
+      if (matchedKey) {
+        return row[matchedKey];
+      }
+    }
+
+    return undefined;
+  }
+
+  private getTaipeiRouteStopMappingCacheKey(routeName: string, direction: number): string {
+    return `${CONFIG.TAIPEI_ROUTE_STOP_MAPPING_CACHE_PREFIX}${routeName}:${direction}`;
+  }
+
+  private async fetchTaipeiEstimateDataset(): Promise<TaipeiEstimateRow[]> {
+    if (!this.isWebEstimateSourceAvailable()) {
+      return [];
+    }
+
+    const now = Date.now();
+    if (this.taipeiEstimateCache && this.taipeiEstimateCache.expiresAt > now) {
+      return this.taipeiEstimateCache.data;
+    }
+
+    if (this.taipeiEstimateInFlight) {
+      return this.taipeiEstimateInFlight;
+    }
+
+    const request = fetch(CONFIG.TAIPEI_ESTIMATE_URL)
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error(`Taipei ETA request failed: ${response.status}`);
+        }
+
+        const text = await this.decompressGzipToText(await response.arrayBuffer());
+        const data = this.parseTaipeiEstimatePayload(text);
+        this.taipeiEstimateCache = {
+          expiresAt: Date.now() + CONFIG.REALTIME_CACHE_TTL_MS,
+          data,
+        };
+        return data;
+      })
+      .finally(() => {
+        this.taipeiEstimateInFlight = null;
+      });
+
+    this.taipeiEstimateInFlight = request;
+    return request;
+  }
+
+  private async fetchTaipeiJsonDataset<T extends Record<string, unknown>>(
+    url: string
+  ): Promise<T[]> {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Taipei dataset request failed: ${response.status}`);
+    }
+
+    const text = await this.decompressGzipToText(await response.arrayBuffer());
+    const trimmed = text.replace(/^\uFEFF/, '').trim();
+    if (!trimmed) {
+      return [];
+    }
+
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) {
+      return parsed as T[];
+    }
+    if (Array.isArray(parsed?.data)) {
+      return parsed.data as T[];
+    }
+    if (Array.isArray(parsed?.BusInfo)) {
+      return parsed.BusInfo as T[];
+    }
+
+    return [];
+  }
+
+  private async fetchTaipeiRouteDataset(): Promise<TaipeiRouteRow[]> {
+    if (!this.isWebEstimateSourceAvailable()) {
+      return [];
+    }
+
+    const now = Date.now();
+    if (this.taipeiRouteCache && this.taipeiRouteCache.expiresAt > now) {
+      return this.taipeiRouteCache.data;
+    }
+    if (this.taipeiRouteInFlight) {
+      return this.taipeiRouteInFlight;
+    }
+
+    const request = this.fetchTaipeiJsonDataset<TaipeiRouteRow>(CONFIG.TAIPEI_ROUTE_URL)
+      .then(data => {
+        this.taipeiRouteCache = {
+          expiresAt: Date.now() + CONFIG.STATIC_CACHE_TTL_MS,
+          data,
+        };
+        return data;
+      })
+      .finally(() => {
+        this.taipeiRouteInFlight = null;
+      });
+
+    this.taipeiRouteInFlight = request;
+    return request;
+  }
+
+  private async fetchTaipeiStopDataset(): Promise<TaipeiStopRow[]> {
+    if (!this.isWebEstimateSourceAvailable()) {
+      return [];
+    }
+
+    const now = Date.now();
+    if (this.taipeiStopCache && this.taipeiStopCache.expiresAt > now) {
+      return this.taipeiStopCache.data;
+    }
+    if (this.taipeiStopInFlight) {
+      return this.taipeiStopInFlight;
+    }
+
+    const request = this.fetchTaipeiJsonDataset<TaipeiStopRow>(CONFIG.TAIPEI_STOP_URL)
+      .then(data => {
+        this.taipeiStopCache = {
+          expiresAt: Date.now() + CONFIG.STATIC_CACHE_TTL_MS,
+          data,
+        };
+        return data;
+      })
+      .finally(() => {
+        this.taipeiStopInFlight = null;
+      });
+
+    this.taipeiStopInFlight = request;
+    return request;
+  }
+
+  private formatTaipeiEstimateTime(value: string | number | null | undefined): {
+    etaText: string;
+    rawTime: number;
+  } {
+    if (value === null || value === undefined || value === '') {
+      return { etaText: BusStatus.UNKNOWN, rawTime: CONFIG.TIME_NOT_DEPARTED };
+    }
+
+    const seconds = typeof value === 'number' ? value : parseInt(String(value), 10);
+    if (isNaN(seconds)) {
+      return { etaText: BusStatus.UNKNOWN, rawTime: CONFIG.TIME_NOT_DEPARTED };
+    }
+
+    if (seconds === -1) {
+      return { etaText: BusStatus.NOT_DEPARTED, rawTime: CONFIG.TIME_NOT_DEPARTED };
+    }
+    if (seconds === -2) {
+      return { etaText: BusStatus.TRAFFIC_CONTROL, rawTime: CONFIG.TIME_NOT_DEPARTED };
+    }
+    if (seconds === -3) {
+      return { etaText: BusStatus.LAST_PASSED, rawTime: CONFIG.TIME_NOT_DEPARTED };
+    }
+    if (seconds === -4) {
+      return { etaText: BusStatus.NOT_OPERATING, rawTime: CONFIG.TIME_NOT_DEPARTED };
+    }
+    if (seconds <= 30) {
+      return { etaText: BusStatus.ARRIVING, rawTime: 0 };
+    }
+    if (seconds < 180) {
+      return { etaText: '\u5373\u5c07\u5230\u7ad9', rawTime: seconds };
+    }
+
+    return {
+      etaText: `${Math.ceil(seconds / 60)}\u5206`,
+      rawTime: seconds,
+    };
+  }
+
+  private getTaipeiEtaPriority(eta: { etaText: string; rawTime: number }): number {
+    if (eta.etaText === BusStatus.UNKNOWN) return 0;
+    if (eta.etaText === BusStatus.NOT_OPERATING) return 1;
+    if (eta.etaText === BusStatus.LAST_PASSED) return 2;
+    if (eta.etaText === BusStatus.TRAFFIC_CONTROL) return 3;
+    if (eta.etaText === BusStatus.NOT_DEPARTED) return 4;
+    if (eta.etaText === BusStatus.ARRIVING) return 6;
+    if (eta.etaText === '\u5373\u5c07\u5230\u7ad9') return 5;
+    return 5;
+  }
+
+  private shouldReplaceTaipeiEta(
+    previous: { etaText: string; rawTime: number } | undefined,
+    next: { etaText: string; rawTime: number }
+  ): boolean {
+    if (!previous) {
+      return true;
+    }
+
+    const previousPriority = this.getTaipeiEtaPriority(previous);
+    const nextPriority = this.getTaipeiEtaPriority(next);
+
+    if (nextPriority !== previousPriority) {
+      return nextPriority > previousPriority;
+    }
+
+    return next.rawTime < previous.rawTime;
+  }
+
+  private normalizeText(value: string | null | undefined): string {
+    return (value || '').replace(/\s+/g, '').trim().toUpperCase();
+  }
+
+  private getRouteField(
+    row: TaipeiRouteRow,
+    candidates: string[]
+  ): string | number | null | undefined {
+    return this.getEstimateField(row as TaipeiEstimateRow, candidates);
+  }
+
+  private getStopField(
+    row: TaipeiStopRow,
+    candidates: string[]
+  ): string | number | null | undefined {
+    return this.getEstimateField(row as TaipeiEstimateRow, candidates);
+  }
+
+  private getTaipeiStopMatchKey(row: TaipeiStopRow): string | undefined {
+    const value = this.getStopField(row, [
+      'Id',
+      'id',
+      'StopID',
+      'stopId',
+      'stopLocationId',
+      'StopLocationId',
+      'stopLocationID',
+      'StopLocationID',
+    ]);
+
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    return String(value);
+  }
+
+  private scoreStopSequenceMatch(
+    localStops: Array<{ sid: string; name: string }>,
+    officialStops: TaipeiStopRow[]
+  ): { score: number; stopIdByLocalSid: Map<string, string> } {
+    const stopIdByLocalSid = new Map<string, string>();
+    const officialNames = officialStops.map(stop =>
+      this.normalizeText(String(this.getStopField(stop, ['nameZh', 'NameZh', 'name']) ?? ''))
+    );
+    const localNames = localStops.map(stop => this.normalizeText(stop.name));
+
+    let indexMatches = 0;
+    const pairLength = Math.min(localStops.length, officialStops.length);
+    for (let index = 0; index < pairLength; index += 1) {
+      if (!localNames[index] || !officialNames[index]) {
+        continue;
+      }
+
+      if (localNames[index] === officialNames[index]) {
+        indexMatches += 1;
+      }
+    }
+
+    const officialNameSet = new Set(officialNames.filter(Boolean));
+    const setMatches = localNames.filter(name => officialNameSet.has(name)).length;
+
+    if (indexMatches >= Math.floor(pairLength * 0.6) && pairLength > 0) {
+      for (let index = 0; index < pairLength; index += 1) {
+        const stopId = this.getTaipeiStopMatchKey(officialStops[index]);
+        if (stopId) {
+          stopIdByLocalSid.set(localStops[index].sid, stopId);
+        }
+      }
+    } else {
+      let officialIndex = 0;
+      for (const localStop of localStops) {
+        const localName = this.normalizeText(localStop.name);
+        while (officialIndex < officialStops.length) {
+          const officialStop = officialStops[officialIndex];
+          const officialName = this.normalizeText(
+            String(this.getStopField(officialStop, ['nameZh', 'NameZh', 'name']) ?? '')
+          );
+          const stopId = this.getTaipeiStopMatchKey(officialStop);
+          officialIndex += 1;
+
+          if (localName && officialName === localName && stopId) {
+            stopIdByLocalSid.set(localStop.sid, stopId);
+            break;
+          }
+        }
+      }
+    }
+
+    const mappedCount = stopIdByLocalSid.size;
+    const score = indexMatches * 3 + setMatches + mappedCount * 2 - Math.abs(localStops.length - officialStops.length);
+
+    return { score, stopIdByLocalSid };
+  }
+
+  private async getTaipeiRouteStopMapping(route: any): Promise<{
+    officialRouteId: string;
+    estimateRouteId?: string;
+    stopIdByLocalSid: Map<string, string>;
+  } | undefined> {
+    const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
+
+    try {
+      const cached = await AsyncStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached) as CachedTaipeiRouteStopMapping;
+        return {
+          officialRouteId: parsed.officialRouteId,
+          estimateRouteId: parsed.estimateRouteId,
+          stopIdByLocalSid: new Map(Object.entries(parsed.stopIdByLocalSid)),
+        };
+      }
+    } catch (error) {
+      console.warn('[BusPlanner] Failed to read Taipei route-stop mapping cache.', error);
+    }
+
+    const [routeRows, stopRows] = await Promise.all([
+      this.fetchTaipeiRouteDataset(),
+      this.fetchTaipeiStopDataset(),
+    ]);
+
+    if (routeRows.length === 0 || stopRows.length === 0) {
+      return undefined;
+    }
+
+    const localRouteName = this.normalizeText(route.route_name);
+    const localStops = (route.stops_sid as string[]).map((sid: string) => ({
+      sid,
+      name: this.getStopInfo(sid)?.name || '',
+    }));
+
+    const candidateRoutes = routeRows.filter(routeRow => {
+      const names = [
+        this.getRouteField(routeRow, ['nameZh', 'NameZh']),
+        this.getRouteField(routeRow, ['aliasName', 'AliasName']),
+        this.getRouteField(routeRow, ['pathAttributeName', 'PathAttributeName']),
+      ];
+
+      return names.some(name => this.normalizeText(String(name ?? '')) === localRouteName);
+    });
+
+    let bestMatch:
+      | { officialRouteId: string; stopIdByLocalSid: Map<string, string>; score: number }
+      | undefined;
+
+    for (const candidateRoute of candidateRoutes) {
+      const officialRouteId = this.getRouteField(candidateRoute, ['Id', 'id', 'RouteID', 'routeId']);
+      if (officialRouteId === undefined || officialRouteId === null) {
+        continue;
+      }
+
+      const officialStops = stopRows
+        .filter(stopRow => {
+          const routeId = this.getStopField(stopRow, ['routeId', 'RouteID', 'RouteId']);
+          const goBack = this.getStopField(stopRow, ['goBack', 'GoBack']);
+          return (
+            String(routeId ?? '') === String(officialRouteId) &&
+            String(goBack ?? '') === String(route.direction)
+          );
+        })
+        .sort((a, b) => {
+          const seqA = Number(this.getStopField(a, ['seqNo', 'SeqNo']) ?? 0);
+          const seqB = Number(this.getStopField(b, ['seqNo', 'SeqNo']) ?? 0);
+          return seqA - seqB;
+        });
+
+      if (officialStops.length === 0) {
+        continue;
+      }
+
+      const scored = this.scoreStopSequenceMatch(localStops, officialStops);
+      if (!bestMatch || scored.score > bestMatch.score) {
+        bestMatch = {
+          officialRouteId: String(officialRouteId),
+          stopIdByLocalSid: scored.stopIdByLocalSid,
+          score: scored.score,
+        };
+      }
+    }
+
+    if (!bestMatch || bestMatch.stopIdByLocalSid.size === 0) {
+      return undefined;
+    }
+
+    try {
+      const cacheValue: CachedTaipeiRouteStopMapping = {
+        officialRouteId: bestMatch.officialRouteId,
+        estimateRouteId: bestMatch.officialRouteId,
+        stopIdByLocalSid: Object.fromEntries(bestMatch.stopIdByLocalSid),
+      };
+      await AsyncStorage.setItem(cacheKey, JSON.stringify(cacheValue));
+    } catch (error) {
+      console.warn('[BusPlanner] Failed to persist Taipei route-stop mapping cache.', error);
+    }
+
+    return {
+      officialRouteId: bestMatch.officialRouteId,
+      estimateRouteId: bestMatch.officialRouteId,
+      stopIdByLocalSid: bestMatch.stopIdByLocalSid,
+    };
+  }
+
+  private async getRouteStopArrivalsFromTaipeiOpenData(
+    route: any
+  ): Promise<RouteDirectionDetails | undefined> {
+    const dataset = await this.fetchTaipeiEstimateDataset();
+    if (dataset.length === 0) {
+      return undefined;
+    }
+
+    const mapping = await this.getTaipeiRouteStopMapping(route);
+    if (!mapping) {
+      return undefined;
+    }
+
+    let routeId = mapping.estimateRouteId || mapping.officialRouteId;
+    let rows = dataset.filter(
+      item => String(this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? '') === routeId
+    );
+
+    if (rows.length === 0) {
+      const localStopIds = new Set(Array.from(mapping.stopIdByLocalSid.values()));
+      const routeIdScores = new Map<string, number>();
+
+      for (const item of dataset) {
+        const stopId = String(
+          this.getEstimateField(item, ['StopID', 'stopId', 'StopId']) ?? ''
+        );
+        if (!localStopIds.has(stopId)) {
+          continue;
+        }
+
+        const candidateRouteId = String(
+          this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? ''
+        );
+        if (!candidateRouteId) {
+          continue;
+        }
+
+        routeIdScores.set(candidateRouteId, (routeIdScores.get(candidateRouteId) || 0) + 1);
+      }
+
+      const bestCandidate = Array.from(routeIdScores.entries()).sort((a, b) => b[1] - a[1])[0];
+      if (bestCandidate) {
+        routeId = bestCandidate[0];
+        rows = dataset.filter(
+          item => String(this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? '') === routeId
+        );
+
+        try {
+          const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
+          const cacheValue: CachedTaipeiRouteStopMapping = {
+            officialRouteId: mapping.officialRouteId,
+            estimateRouteId: routeId,
+            stopIdByLocalSid: Object.fromEntries(mapping.stopIdByLocalSid),
+          };
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(cacheValue));
+          mapping.estimateRouteId = routeId;
+        } catch (error) {
+          console.warn('[BusPlanner] Failed to persist inferred estimate RouteID.', error);
+        }
+      }
+    }
+
+    if (rows.length === 0) {
+      return undefined;
+    }
+
+    const bestByStopId = new Map<string, { etaText: string; rawTime: number }>();
+
+    for (const row of rows) {
+      const stopId = String(
+        this.getEstimateField(row, ['StopID', 'stopId', 'StopId']) ?? ''
+      );
+      if (!stopId) {
+        continue;
+      }
+
+      const formatted = this.formatTaipeiEstimateTime(
+        this.getEstimateField(row, ['EstimateTime', 'estimateTime'])
+      );
+      const previous = bestByStopId.get(stopId);
+
+      if (this.shouldReplaceTaipeiEta(previous, formatted)) {
+        bestByStopId.set(stopId, formatted);
+      }
+    }
+
+    return {
+      routeName: route.route_name,
+      rid: route.rid,
+      direction: route.direction,
+      directionText: this.getDirectionText(route.direction),
+      stops: (route.stops_sid as string[]).map((sid: string) => {
+        const info = this.getStopInfo(sid);
+        const officialStopId = mapping.stopIdByLocalSid.get(String(sid));
+        const realtime = officialStopId ? bestByStopId.get(officialStopId) : undefined;
+
+        return {
+          sid,
+          slid: info?.slid,
+          name: info?.name || 'Unknown',
+          etaText: realtime?.etaText || '\u66ab\u7121\u8cc7\u6599',
+          rawTime: realtime?.rawTime ?? CONFIG.TIME_NOT_DEPARTED,
+        };
+      }),
+    };
   }
 
   // --- Helpers: Repository Logic ---
@@ -162,12 +824,16 @@ export class BusPlannerService {
     return { name, slid, sid, geo };
   }
 
-  // --- Public API Methods (補充 Vercel 版本缺少的方法) ---
+  private getDirectionText(direction: number): string {
+    return direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b';
+  }
+
+  // --- Public API Methods (鋆? Vercel ?蝻箏??瘜? ---
 
   /**
-   * 取得指定 SID 的地理位置
-   * @param sid 站點 ID
-   * @returns 地理位置或 undefined
+   * ???? SID ???蝵?
+   * @param sid 蝡? ID
+   * @returns ?啁?雿蔭??undefined
    */
   public getGeoBySid(sid: string): GeoLocation | undefined {
     const info = this.getStopInfo(sid);
@@ -175,17 +841,17 @@ export class BusPlannerService {
   }
 
   /**
-   * 取得所有站名列表
-   * @returns 站名陣列
+   * ???????銵?
+   * @returns 蝡????
    */
   public getAllStopNames(): string[] {
     return Object.keys(this.stopDb.n);
   }
 
   /**
-   * 取得代表性的 SID 列表（去除重複的 SLID）
-   * @param name 站名
-   * @returns 代表性 SID 陣列
+   * ??隞?”?抒? SID ?”嚗?日?銴? SLID嚗?
+   * @param name 蝡?
+   * @returns 隞?”??SID ???
    */
   public getRepresentativeSids(name: string): string[] {
     const allSids = this.getSidsByName(name);
@@ -207,10 +873,10 @@ export class BusPlannerService {
   }
 
   /**
-   * 尋找最近的站牌
-   * @param userLat 使用者緯度
-   * @param userLon 使用者經度
-   * @returns 最近站名或 null
+   * 撠?餈?蝡?
+   * @param userLat 雿輻?楝摨?
+   * @param userLon 雿輻??摨?
+   * @returns ?餈??? null
    */
   public findNearestStop(userLat: number, userLon: number): string | null {
     const stopNames = this.getAllStopNames();
@@ -235,11 +901,11 @@ export class BusPlannerService {
   }
 
   /**
-   * 計算兩點間距離（Haversine 公式）
+   * 閮??拚????ｇ?Haversine ?砍?嚗?
    * @private
    */
   private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371; // 地球半徑（公里）
+    const R = 6371; // ?啁???嚗??
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = 
@@ -251,9 +917,9 @@ export class BusPlannerService {
   }
 
   /**
-   * 取得路線結構資訊
-   * @param rid 路線 ID
-   * @returns 路線結構或 undefined
+   * ??頝舐?蝯?鞈?
+   * @param rid 頝舐? ID
+   * @returns 頝舐?蝯???undefined
    */
   public getRouteStructure(rid: string): any {
     const route = this.routeDb.find(r => r.rid === rid);
@@ -262,7 +928,7 @@ export class BusPlannerService {
     return {
       routeName: route.route_name,
       rid: route.rid,
-      direction: route.direction === 0 ? '去程' : '返程',
+      direction: route.direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b',
       goStops: route.direction === 0 
         ? route.stops_sid.map((sid: string) => {
             const info = this.getStopInfo(sid);
@@ -279,10 +945,106 @@ export class BusPlannerService {
   }
 
   /**
-   * 抓取特定 SID 的公車動態（相容舊版 API）
-   * @param sid 站點 ID
-   * @returns 公車資訊陣列
+   * ???孵? SID ?頠????詨捆?? API嚗?
+   * @param sid 蝡? ID
+   * @returns ?祈?鞈????
    */
+  public getRouteByName(routeName: string): RouteDetails | undefined {
+    const routes = this.routeDb
+      .filter(route => route.route_name === routeName)
+      .sort((a, b) => a.direction - b.direction);
+
+    if (routes.length === 0) return undefined;
+
+    return {
+      routeName,
+      directions: routes.map(route => ({
+        routeName: route.route_name,
+        rid: route.rid,
+        direction: route.direction,
+        directionText: this.getDirectionText(route.direction),
+        stops: (route.stops_sid as string[]).map((sid: string) => {
+          const info = this.getStopInfo(sid);
+          return {
+            sid,
+            slid: info?.slid,
+            name: info?.name || 'Unknown',
+            etaText: '\u8f09\u5165\u4e2d',
+            rawTime: CONFIG.TIME_NOT_DEPARTED,
+          };
+        }),
+      })),
+    };
+  }
+
+  public async getRouteStopArrivals(
+    routeName: string,
+    direction: number
+  ): Promise<RouteDirectionDetails | undefined> {
+    const route = this.routeDb.find(
+      item => item.route_name === routeName && item.direction === direction
+    );
+
+    if (!route) return undefined;
+
+    try {
+      const taipeiRealtime = await this.getRouteStopArrivalsFromTaipeiOpenData(route);
+      if (taipeiRealtime) {
+        return taipeiRealtime;
+      }
+    } catch (error) {
+      console.warn('[BusPlanner] Taipei ETA source unavailable, falling back.', error);
+    }
+
+    const stops = (route.stops_sid as string[]).map((sid: string) => {
+      const info = this.getStopInfo(sid);
+      return {
+        sid,
+        slid: info?.slid,
+        name: info?.name || 'Unknown',
+      };
+    });
+
+    const stopsWithSlid = stops.filter(
+      (stop): stop is { sid: string; slid: string; name: string } => Boolean(stop.slid)
+    );
+
+    const realtimeResults = await this.batchProcess(
+      stopsWithSlid,
+      async stop => {
+        const buses = await this.fetchRealtimeBySlidCached(stop.slid, stop.sid);
+        const match = buses.find((bus: any) => bus.rid === route.rid && bus.route === routeName);
+
+        return {
+          sid: stop.sid,
+          etaText: match?.time_text || '\u66ab\u7121\u8cc7\u6599',
+          rawTime: typeof match?.raw_time === 'number' ? match.raw_time : CONFIG.TIME_NOT_DEPARTED,
+        };
+      }
+    );
+
+    const realtimeMap = new Map(realtimeResults.map(item => [item.sid, item]));
+
+    const fallbackResult = {
+      routeName: route.route_name,
+      rid: route.rid,
+      direction: route.direction,
+      directionText: this.getDirectionText(route.direction),
+      stops: stops.map(stop => {
+        const realtime = realtimeMap.get(stop.sid);
+        return {
+          sid: stop.sid,
+          slid: stop.slid,
+          name: stop.name,
+          etaText: realtime?.etaText || '\u66ab\u7121\u8cc7\u6599',
+          rawTime: realtime?.rawTime ?? CONFIG.TIME_NOT_DEPARTED,
+        };
+      }),
+    };
+
+    return fallbackResult;
+  }
+
   public async fetchBusesAtSid(sid: string): Promise<any[]> {
     const info = this.getStopInfo(sid);
     if (!info) return [];
@@ -291,11 +1053,11 @@ export class BusPlannerService {
     const slid = info.slid;
 
     if (!slid) {
-      console.warn(`[BusPlanner] SID ${sid} 沒有對應的 SLID`);
+      console.warn(`[BusPlanner] SID ${sid} 瘝?撠???SLID`);
       return [];
     }
 
-    // 使用新版的 SLID 查詢方法
+    // 雿輻?啁???SLID ?亥岷?寞?
     return this.getArrivalsBySlid(slid, stopName);
   }
 
@@ -304,31 +1066,31 @@ export class BusPlannerService {
     const endSids = new Set(this.getSidsByName(endName));
 
     if (startSids.size === 0 || endSids.size === 0) {
-        console.warn(`[BusPlanner] 找不到站點: ${startName} 或 ${endName}`);
+        console.warn(`[BusPlanner] ?曆??啁?暺? ${startName} ??${endName}`);
         return [];
     }
 
     const candidates: StaticRouteMatch[] = [];
 
-    // 遍歷所有路線
+    // ?風??楝蝺?
     for (const route of this.routeDb) {
         const stops: string[] = route.stops_sid;
         
-        // 1. 找出路線中所有符合「起點名稱」的位置索引
+        // 1. ?曉頝舐?銝剜??泵?絲暺?蝔晞?雿蔭蝝Ｗ?
         const startIndices = stops
             .map((sid, idx) => startSids.has(sid) ? idx : -1)
             .filter(i => i !== -1);
             
-        // 2. 找出路線中所有符合「終點名稱」的位置索引
+        // 2. ?曉頝舐?銝剜??泵??暺?蝔晞?雿蔭蝝Ｗ?
         const endIndices = stops
             .map((sid, idx) => endSids.has(sid) ? idx : -1)
             .filter(i => i !== -1);
 
         if (startIndices.length === 0 || endIndices.length === 0) continue;
 
-        // 3. 配對邏輯 (與 Python _match_single_route 對齊)
+        // 3. ???摩 (??Python _match_single_route 撠?)
         for (const sIdx of startIndices) {
-            // 找到該起點之後，最近的一個終點
+            // ?曉閰脰絲暺?敺??餈?銝??暺?
             const firstValidEnd = endIndices.find(eIdx => eIdx > sIdx);
             
             if (firstValidEnd !== undefined) {
@@ -339,8 +1101,8 @@ export class BusPlannerService {
                     stops_sid: route.stops_sid,
                     match_range: [sIdx, firstValidEnd]
                 });
-                // 修正：移除 break，繼續檢查下一個 startIndices
-                // 例如：某路線在第 5 站和第 20 站都經過「淡水」，兩者都可能是合法的上車點
+                // 靽格迤嚗宏??break嚗匱蝥炎?乩?銝??startIndices
+                // 靘?嚗?頝舐??函洵 5 蝡?蝚?20 蝡蝬??楚瘞氬??抵?航?臬?瘜?銝?暺?
             }
         }
     }
@@ -350,7 +1112,7 @@ export class BusPlannerService {
   // --- Network Logic ---
 
   /**
-   * 批次處理請求以控制併發量 (模擬 Python 的 asyncio + batch logic)
+   * ?寞活??隢?隞交?嗡蔥?潮? (璅⊥ Python ??asyncio + batch logic)
    */
   private async batchProcess<T, R>(
     items: T[], 
@@ -381,12 +1143,12 @@ export class BusPlannerService {
         const $ = cheerio.load(resHtml);
         const routeMap: Record<string, { route: string; rid: string; direction: string }> = {};
 
-        // 解析 HTML 表格建立 rid 對照表（包含方向資訊）
+        // 閫?? HTML 銵冽撱箇? rid 撠銵剁???孵?鞈?嚗?
         $('tr').each((_, row) => {
             const $row = $(row);
             const cols = $row.find('td');
             
-            // 需要至少 3 個欄位：路線、站牌、方向、時間
+            // ?閬撠?3 ??雿?頝舐????????
             if (cols.length < 3) return;
             
             const link = $row.find('a[href*="route.jsp"]').first();
@@ -396,7 +1158,7 @@ export class BusPlannerService {
             const ridMatch = href.match(/rid=(\d+)/);
             const rid = ridMatch ? ridMatch[1] : "";
             
-            // 取得方向資訊（第 3 個欄位）
+            // ???孵?鞈?嚗洵 3 ??雿?
             const direction = $(cols[2]).text().trim();
 
             const dynIdNode = $row.find('[id^="tte"]');
@@ -414,7 +1176,7 @@ export class BusPlannerService {
 
         const buses: any[] = [];
 
-        // 整合 JSON 動態資料
+        // ?游? JSON ??鞈?
         if (resJson && resJson.Stop) {
             for (const item of resJson.Stop) {
                 const vals = (item.n1 || "").split(',');
@@ -432,7 +1194,7 @@ export class BusPlannerService {
                         route: info.route,
                         rid: info.rid,
                         sid: repSid,
-                        direction: info.direction, // 加入方向資訊
+                        direction: info.direction, // ??孵?鞈?
                         time_text: timeText,
                         raw_time: TimeParser.parseTextToSeconds(timeText)
                     });
@@ -440,14 +1202,14 @@ export class BusPlannerService {
             }
         }
 
-        // 處理剩餘項目 (未發車/無動態)
+        // ???拚?? (?芰頠??∪???
         for (const k in routeMap) {
             buses.push({
                 route: routeMap[k].route,
                 rid: routeMap[k].rid,
                 sid: repSid,
-                direction: routeMap[k].direction, // 加入方向資訊
-                time_text: "更新中", 
+                direction: routeMap[k].direction, // ??孵?鞈?
+                time_text: '\u672a\u767c\u8eca',
                 raw_time: CONFIG.TIME_NOT_DEPARTED
             });
         }
@@ -462,15 +1224,15 @@ export class BusPlannerService {
   // --- Main Business Logic ---
 
   public async plan(startName: string, endName: string): Promise<BusInfo[]> {
-    console.log(`🚀 [BusPlanner] Planning: ${startName} -> ${endName}`);
+    console.log(`?? [BusPlanner] Planning: ${startName} -> ${endName}`);
 
-    // 0. Cache Check (可選)
+    // 0. Cache Check (?舫)
     const cacheKey = `${CONFIG.CACHE_KEY_PREFIX}${startName}|${endName}`;
     try {
         const cached = await AsyncStorage.getItem(cacheKey);
         if (cached) {
             const cachedBuses: BusInfo[] = JSON.parse(cached);
-            console.log("命中快取，更新時間中...");
+            console.log("?賭葉敹怠?嚗?唳??葉...");
             return await this.updateCachedBuses(cachedBuses);
         }
     } catch (e) { /* ignore */ }
@@ -482,8 +1244,8 @@ export class BusPlannerService {
     console.log(`Found ${matchedRoutes.length} static candidates.`);
 
     // 2. Prepare for Realtime Fetching
-    // 找出所有需要查詢的 SLID (去重)
-    const slidMap = new Map<string, string>(); // slid -> repSid (代表SID)
+    // ?曉???閬閰Ｙ? SLID (?駁?)
+    const slidMap = new Map<string, string>(); // slid -> repSid (隞?”SID)
     
     matchedRoutes.forEach(r => {
         const startSid = r.stops_sid[r.match_range[0]];
@@ -500,15 +1262,15 @@ export class BusPlannerService {
     // 3. Batch Fetch Realtime Data
     const nestedResults = await this.batchProcess(
         tasks,
-        (task) => this.fetchRealtimeBySlid(task.slid, task.sid)
+        (task) => this.fetchRealtimeBySlidCached(task.slid, task.sid)
     );
     const allRealtimeBuses = nestedResults.flat();
 
-    // 建立快速查找表: SLID -> Array of RealtimeData
+    // 撱箇?敹恍?曇”: SLID -> Array of RealtimeData
     const realtimeLookup: Record<string, any[]> = {};
     allRealtimeBuses.forEach(b => {
-        // 因為 realtime data 只有 rid 和 time，我們需要知道它屬於哪個 SLID
-        // 這裡稍微 trick：我們在 fetchRealtimeBySlid 裡塞入了 sid，反查 sid -> slid
+        // ? realtime data ?芣? rid ??time嚗???閬??撅祆?芸?SLID
+        // ?ㄐ蝔凝 trick嚗?? fetchRealtimeBySlid 鋆∪??乩? sid嚗???sid -> slid
         const info = this.getStopInfo(b.sid);
         if (info && info.slid) {
             if (!realtimeLookup[info.slid]) realtimeLookup[info.slid] = [];
@@ -530,7 +1292,7 @@ export class BusPlannerService {
         const busesAtStop = realtimeLookup[sInfo.slid] || [];
         const matchBus = busesAtStop.find(b => b.rid === route.rid);
 
-        const arrivalText = matchBus ? matchBus.time_text : "未發車";
+        const arrivalText = matchBus ? matchBus.time_text : '\u672a\u767c\u8eca';
         const rawTime = matchBus ? matchBus.raw_time : CONFIG.TIME_NOT_DEPARTED;
 
         // Build Path
@@ -538,7 +1300,7 @@ export class BusPlannerService {
         const pathStops: StopInfo[] = pathSids.map(sid => {
             const info = this.getStopInfo(sid);
             return {
-                name: info?.name || "未知",
+                name: info?.name || "?芰",
                 sid: sid,
                 slid: info?.slid,
                 geo: info?.geo
@@ -551,9 +1313,9 @@ export class BusPlannerService {
             sid: startSid,
             arrivalTimeText: arrivalText,
             rawTime: rawTime,
-            directionText: route.direction === 0 ? "去程" : "返程",
+            directionText: route.direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b',
             stopCount: pathStops.length - 1,
-            estimatedDuration: Math.ceil((pathStops.length - 1) * 2 + 1), // 估算：每站2分鐘+緩衝1分鐘
+            estimatedDuration: Math.ceil((pathStops.length - 1) * 2 + 1), // 隡啁?嚗?蝡???+蝺抵?1??
             startGeo: pathStops[0].geo,
             endGeo: pathStops[pathStops.length - 1].geo,
             pathStops: pathStops
@@ -572,25 +1334,25 @@ export class BusPlannerService {
   public async getArrivalsBySlid(slid: string, stopName: string): Promise<any[]> {
     console.log(`[BusPlanner] Using direct SLID: ${slid}`);
 
-    const buses = await this.fetchRealtimeBySlid(slid, stopName); // 或 slid
+    const buses = await this.fetchRealtimeBySlidCached(slid, stopName); // ??slid
 
-    // 排序回傳（使用共用比較器，支援不同欄位命名）
+    // ???嚗蝙?典?冽?頛嚗?港???雿??
     return buses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async getStopArrivals(stopName: string): Promise<any[]> {
-    // 1. 確保初始化
+    // 1. 蝣箔?????
     if (!this.stopDb) {
       console.warn("Service not initialized, loading DB...");
-      // 若您的 constructor 是同步讀取 JSON，這裡可忽略；若是非同步，需確保 init
+      // ?交??constructor ?臬?甇亥???JSON嚗ㄐ?臬蕭?伐??交??甇伐??蝣箔? init
     }
 
-    // 2. 取得該站名對應的所有 SID
+    // 2. ??閰脩????????SID
     const sids = this.getSidsByName(stopName);
     if (sids.length === 0) return [];
 
-    // 3. 找出不重複的 SLID (Stop Location ID) 以避免重複請求
-    // 邏輯：同一個站名可能有多個站牌 (SID)，但它們可能共享同一個動態來源 (SLID)
+    // 3. ?曉銝?銴? SLID (Stop Location ID) 隞仿??銴?瘙?
+    // ?摩嚗?銝????賣?憭???(SID)嚗?摰?賢鈭怠?銝????皞?(SLID)
     const slidMap = new Map<string, string>(); // slid -> representative_sid
     
     for (const sid of sids) {
@@ -602,15 +1364,15 @@ export class BusPlannerService {
       }
     }
 
-    // 4. 批次並行抓取 (使用既有的 batchProcess 機制)
+    // 4. ?寞活銝西??? (雿輻?Ｘ???batchProcess 璈)
     const tasks = Array.from(slidMap.entries()).map(([slid, sid]) => ({ slid, sid }));
     
     const nestedResults = await this.batchProcess(
       tasks,
-      (task) => this.fetchRealtimeBySlid(task.slid, task.sid)
+      (task) => this.fetchRealtimeBySlidCached(task.slid, task.sid)
     );
 
-    // 5. 攤平結果並排序（使用共用比較器）
+    // 5. ?文像蝯?銝行?摨?雿輻?梁瘥??剁?
     const allBuses = nestedResults.flat();
     return allBuses.sort((a, b) => compareArrivals(a, b));
   }
@@ -633,14 +1395,14 @@ export class BusPlannerService {
     // Re-fetch only needed SLIDs
     const updatedArrays = await this.batchProcess(tasks, async ({ slid, buses }) => {
         const repSid = buses[0].sid;
-        const realtimes = await this.fetchRealtimeBySlid(slid, repSid);
+        const realtimes = await this.fetchRealtimeBySlidCached(slid, repSid);
         const rtMap = new Map(realtimes.map(r => [r.rid, r]));
 
         return buses.map(b => {
             const rt = rtMap.get(b.rid);
             return {
                 ...b,
-                arrivalTimeText: rt ? rt.time_text : "更新中",
+                arrivalTimeText: rt ? rt.time_text : '\u672a\u767c\u8eca',
                 rawTime: rt ? rt.raw_time : CONFIG.TIME_NOT_DEPARTED
             };
         });

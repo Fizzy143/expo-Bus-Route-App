@@ -906,6 +906,22 @@ export default function StopScreen() {
             style={styles.sidebarItem}
             onPress={() => {
               setSidebarVisible(false);
+              setTimeout(() => {
+                router.push({
+                  pathname: '/bus-route' as any,
+                  params: { routeName: '606' },
+                });
+              }, 300);
+            }}
+          >
+            <Text style={styles.sidebarItemIcon}>606</Text>
+            <Text style={styles.sidebarItemText}>606 路線詳情</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.sidebarItem}
+            onPress={() => {
+              setSidebarVisible(false);
               setTimeout(() => setNotificationModalVisible(true), 300);
             }}
           >
