@@ -20,7 +20,7 @@ import {
 } from '../components/busPlanner';
 
 const DEFAULT_ROUTE_NAME = '606';
-const AUTO_REFRESH_MS = 30000;
+const AUTO_REFRESH_MS = 10000;
 const LOADING_TEXT = '\u8f09\u5165\u4e2d';
 const NO_DATA_TEXT = '\u66ab\u7121\u8cc7\u6599';
 const PAGE_TITLE = '\u8def\u7dda\u8a73\u60c5';
@@ -131,6 +131,15 @@ export default function BusRouteDetailScreen() {
   const [lastUpdate, setLastUpdate] = useState('');
 
   const currentDirectionData = directionData[selectedDirection];
+
+  const handleBackPress = () => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && window.history.length <= 1) {
+      router.replace('/');
+      return;
+    }
+
+    router.back();
+  };
 
   const updateSelectedDirection = (index: number) => {
     selectedDirectionRef.current = index;
@@ -250,13 +259,31 @@ export default function BusRouteDetailScreen() {
   const renderBadge = (stop: RouteStopArrival) => {
     const text = normalizeEtaText(stop.etaText, stop.rawTime);
     let badgeStyle = styles.badgeGray;
+    let isSoftRedMinutes = false;
 
     if (stop.rawTime <= 0 || text.includes(COMING_TEXT) || text.includes(SOON_TEXT)) {
       badgeStyle = styles.badgeRed;
+    } else if (stop.rawTime > 0 && stop.rawTime <= 180) {
+      badgeStyle = styles.badgeSoftRed;
+      isSoftRedMinutes = /^\d+\s*分$/.test(text);
     } else if (text === LOADING_TEXT) {
       badgeStyle = styles.badgeGray;
     } else if (/\d/.test(text)) {
       badgeStyle = styles.badgeBlue;
+    }
+
+    if (isSoftRedMinutes) {
+      const matched = text.match(/^(\d+)\s*分$/);
+      const minuteValue = matched?.[1] ?? text;
+
+      return (
+        <View style={[styles.badgeBase, styles.badgeSoftRed, styles.badgeSoftRedWide]}>
+          <Text style={styles.badgeSoftRedText}>
+            <Text style={styles.badgeSoftRedNumber}>{minuteValue}</Text>
+            <Text style={styles.badgeSoftRedUnit}> 分</Text>
+          </Text>
+        </View>
+      );
     }
 
     return (
@@ -296,7 +323,7 @@ export default function BusRouteDetailScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.headerButton}>
+        <TouchableOpacity onPress={handleBackPress} style={styles.headerButton}>
           <Text style={styles.headerButtonText}>{BACK_TEXT}</Text>
         </TouchableOpacity>
 
@@ -544,6 +571,27 @@ const styles = StyleSheet.create({
   },
   badgeRed: {
     backgroundColor: '#E74C3C',
+  },
+  badgeSoftRed: {
+    backgroundColor: '#dccaca',
+  },
+  badgeSoftRedWide: {
+    minWidth: 76,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  badgeSoftRedText: {
+    color: '#D7343A',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  badgeSoftRedNumber: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  badgeSoftRedUnit: {
+    fontSize: 14,
+    fontWeight: '700',
   },
   badgeBlue: {
     backgroundColor: '#6F73F8',

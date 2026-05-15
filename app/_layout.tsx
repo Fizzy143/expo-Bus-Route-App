@@ -40,56 +40,20 @@ export default function Layout() {
       <Stack
         screenOptions={{
           headerShown: false,
-          animation: Platform.OS === 'ios' ? 'default' : Platform.OS === 'web' ? 'fade' : 'slide_from_right',
-          animationDuration: Platform.OS === 'web' ? 200 : 250,
+          animation: 'fade',
+          animationDuration: 200,
           // 為手機裝置配置內容樣式，預留狀態欄空間
           contentStyle: {
             backgroundColor: '#152021',
           },
         }}
       >
-        <Stack.Screen 
-          name="index" 
-          options={{
-            animation: 'fade',
-            animationDuration: Platform.OS === 'web' ? 200 : 100,
-          }}
-        />
-        <Stack.Screen 
-          name="search" 
-          options={{
-            animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',
-            animationDuration: Platform.OS === 'web' ? 200 : 250,
-          }}
-        />
-        <Stack.Screen 
-          name="route" 
-          options={{
-            animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',
-            animationDuration: Platform.OS === 'web' ? 200 : 250,
-          }}
-        />
-        <Stack.Screen 
-          name="bus-route" 
-          options={{
-            animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',
-            animationDuration: Platform.OS === 'web' ? 200 : 250,
-          }}
-        />
-        <Stack.Screen 
-          name="stop" 
-          options={{
-            animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',
-            animationDuration: Platform.OS === 'web' ? 200 : 250,
-          }}
-        />
-        <Stack.Screen 
-          name="map" 
-          options={{
-            animation: Platform.OS === 'web' ? 'fade' : 'slide_from_right',
-            animationDuration: Platform.OS === 'web' ? 200 : 250,
-          }}
-        />
+        <Stack.Screen name="index" />
+        <Stack.Screen name="search" />
+        <Stack.Screen name="route" />
+        <Stack.Screen name="bus-route" />
+        <Stack.Screen name="stop" />
+        <Stack.Screen name="map" />
       </Stack>
     </SafeAreaProvider>
   );

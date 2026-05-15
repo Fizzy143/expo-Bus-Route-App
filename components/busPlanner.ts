@@ -1,19 +1,18 @@
 /**
  * BusPlannerService.ts
- * 蝘餅???busPlanner.py (Refactored Version)
+ * ?��????busPlanner.py (Refactored Version)
  * Environment: React Native (Expo SDK 54+) / Node 20+
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as cheerio from 'cheerio';
 
-// ?身???JSON 瑼?雿撠?蝯?銝剜迤蝣箇?雿蔭
-// ?亙 Expo 銝哨?隢Ⅱ靽?瑼?銝??之撠 Bundle 憭望?嚗???寧 expo-file-system 銝?
+// ??�身???JSON ?��???��?�????��???��?迤蝣�??��???// ?亙 Expo ?�哨??��??�靽�??��???��????��??��???Bundle ?��???�?????寧�? expo-file-system ?��??
 import routeDataRaw from '../databases/metro_bus_routes.json';
 import stopDataRaw from '../databases/stop_id_map_v3.json';
 import { compareArrivals } from '../utils/routeSorter';
 
-// ========== 憿?摰儔 (? busPlanner.ts) ==========
+// ========== ?�??�??(??� busPlanner.ts) ==========
 
 export interface GeoLocation {
   lat: number;
@@ -30,12 +29,12 @@ export interface StopInfo {
 export interface BusInfo {
   routeName: string;
   rid: string;
-  sid: string; // ????函?蝡? ID
+  sid: string; // ?�???????��?? ID
   arrivalTimeText: string;
-  rawTime: number; // ?冽??
+  rawTime: number; // ??��????
   directionText: string;
   stopCount: number;
-  estimatedDuration?: number; // ?摯?凋???嚗???
+  estimatedDuration?: number; // ??�摯????�??��????
   startGeo?: GeoLocation;
   endGeo?: GeoLocation;
   pathStops: StopInfo[];
@@ -62,7 +61,7 @@ export interface RouteDetails {
   directions: RouteDirectionDetails[];
 }
 
-// ?冽??頝舐??寥??葉隞?瑽?
+// ??��??�??��???�???��??��????
 interface StaticRouteMatch {
   route_name: string;
   rid: string;
@@ -106,10 +105,10 @@ interface CachedTaipeiRouteStopMapping {
 }
 
 
-// ========== ?蔭?虜??==========
+// ========== ??�蔭??��???==========
 
 const CONFIG = {
-  // 雿輻 Python ?? Proxy 閮剖?
+  // ?�輻??Python ??? Proxy ?��??
   BASE_URL: "https://api.codetabs.com/v1/proxy?quest=https://pda5284.gov.taipei/MQS",
   TAIPEI_ESTIMATE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetEstimateTime.gz',
   TAIPEI_ROUTE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz',
@@ -187,10 +186,10 @@ class TimeParser {
   }
 }
 
-// ========== ?詨??? ==========
+// ========== ?�???? ==========
 
 export class BusPlannerService {
-  // 鞈?摨怎?瑽?撠?stop_id_map_v3.json
+  // ?�??��??��????stop_id_map_v3.json
   private stopDb: {
     g: number[][]; // Geo Pool
     n: Record<string, string[]>; // Name Index
@@ -208,8 +207,8 @@ export class BusPlannerService {
   private taipeiStopInFlight: Promise<TaipeiStopRow[]> | null = null;
 
   constructor() {
-    // ??React Native 銝哨?JSON import ?臬?甇亦?嚗???甇亙?憪?
-    // 憿??瑁?隞亦泵????瑽?
+    // ??React Native ?�哨?JSON import ????�亦??�????�??��???��??
+    // ?�?????�亦�????�???
     this.stopDb = stopDataRaw as any;
     this.routeDb = routeDataRaw as any[];
   }
@@ -455,7 +454,7 @@ export class BusPlannerService {
     if (seconds <= 30) {
       return { etaText: BusStatus.ARRIVING, rawTime: 0 };
     }
-    if (seconds < 180) {
+    if (seconds < 60) {
       return { etaText: '\u5373\u5c07\u5230\u7ad9', rawTime: seconds };
     }
 
@@ -828,12 +827,12 @@ export class BusPlannerService {
     return direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b';
   }
 
-  // --- Public API Methods (鋆? Vercel ?蝻箏??瘜? ---
+  // --- Public API Methods (?�? Vercel ??�?��????��??? ---
 
   /**
-   * ???? SID ???蝵?
-   * @param sid 蝡? ID
-   * @returns ?啁?雿蔭??undefined
+   * ?�???? SID ??�?????
+   * @param sid ?��?? ID
+   * @returns ????��????undefined
    */
   public getGeoBySid(sid: string): GeoLocation | undefined {
     const info = this.getStopInfo(sid);
@@ -841,17 +840,17 @@ export class BusPlannerService {
   }
 
   /**
-   * ???????銵?
-   * @returns 蝡????
+   * ?�???????????
+   * @returns ?��?????
    */
   public getAllStopNames(): string[] {
     return Object.keys(this.stopDb.n);
   }
 
   /**
-   * ??隞?”?抒? SID ?”嚗?日?銴? SLID嚗?
-   * @param name 蝡?
-   * @returns 隞?”??SID ???
+   * ?�??????? SID ?”�??�????�? SLID??
+   * @param name ?��??
+   * @returns ?????SID ???
    */
   public getRepresentativeSids(name: string): string[] {
     const allSids = this.getSidsByName(name);
@@ -873,10 +872,10 @@ export class BusPlannerService {
   }
 
   /**
-   * 撠?餈?蝡?
-   * @param userLat 雿輻?楝摨?
-   * @param userLon 雿輻??摨?
-   * @returns ?餈??? null
+   * ?��????餈??��??
+   * @param userLat ?�輻???��???
+   * @param userLon ?�輻??????
+   * @returns ??餈???? null
    */
   public findNearestStop(userLat: number, userLon: number): string | null {
     const stopNames = this.getAllStopNames();
@@ -901,11 +900,11 @@ export class BusPlannerService {
   }
 
   /**
-   * 閮??拚????ｇ?Haversine ?砍?嚗?
+   * ?��?????????�?Haversine ?????
    * @private
    */
   private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371; // ?啁???嚗??
+    const R = 6371; // ?????�??��?????
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
     const a = 
@@ -917,9 +916,9 @@ export class BusPlannerService {
   }
 
   /**
-   * ??頝舐?蝯?鞈?
-   * @param rid 頝舐? ID
-   * @returns 頝舐?蝯???undefined
+   * ?�??��???��???�?
+   * @param rid ?��?? ID
+   * @returns ?��???��????undefined
    */
   public getRouteStructure(rid: string): any {
     const route = this.routeDb.find(r => r.rid === rid);
@@ -945,9 +944,9 @@ export class BusPlannerService {
   }
 
   /**
-   * ???孵? SID ?頠????詨捆?? API嚗?
-   * @param sid 蝡? ID
-   * @returns ?祈?鞈????
+   * ????�? SID ??�?��??????詨�???? API??
+   * @param sid ?��?? ID
+   * @returns ?�??�????
    */
   public getRouteByName(routeName: string): RouteDetails | undefined {
     const routes = this.routeDb
@@ -1053,11 +1052,11 @@ export class BusPlannerService {
     const slid = info.slid;
 
     if (!slid) {
-      console.warn(`[BusPlanner] SID ${sid} 瘝?撠???SLID`);
+      console.warn(`[BusPlanner] SID ${sid} ?��???��????SLID`);
       return [];
     }
 
-    // 雿輻?啁???SLID ?亥岷?寞?
+    // ?�輻??????SLID ?亥岷?�?
     return this.getArrivalsBySlid(slid, stopName);
   }
 
@@ -1066,31 +1065,31 @@ export class BusPlannerService {
     const endSids = new Set(this.getSidsByName(endName));
 
     if (startSids.size === 0 || endSids.size === 0) {
-        console.warn(`[BusPlanner] ?曆??啁?暺? ${startName} ??${endName}`);
+        console.warn(`[BusPlanner] ???????? ${startName} ??${endName}`);
         return [];
     }
 
     const candidates: StaticRouteMatch[] = [];
 
-    // ?風??楝蝺?
+    // ??�風????��???
     for (const route of this.routeDb) {
         const stops: string[] = route.stops_sid;
         
-        // 1. ?曉頝舐?銝剜??泵?絲暺?蝔晞?雿蔭蝝Ｗ?
+        // 1. ??�?��???��????�泵??�?�絲?�??��?????��??��?�?
         const startIndices = stops
             .map((sid, idx) => startSids.has(sid) ? idx : -1)
             .filter(i => i !== -1);
             
-        // 2. ?曉頝舐?銝剜??泵??暺?蝔晞?雿蔭蝝Ｗ?
+        // 2. ??�?��???��????�泵??�???�??��?????��??��?�?
         const endIndices = stops
             .map((sid, idx) => endSids.has(sid) ? idx : -1)
             .filter(i => i !== -1);
 
         if (startIndices.length === 0 || endIndices.length === 0) continue;
 
-        // 3. ???摩 (??Python _match_single_route 撠?)
+        // 3. ?????�摩 (??Python _match_single_route ?��??)
         for (const sIdx of startIndices) {
-            // ?曉閰脰絲暺?敺??餈?銝??暺?
+            // ??��??�脰絲暺�??��????餈??�?????
             const firstValidEnd = endIndices.find(eIdx => eIdx > sIdx);
             
             if (firstValidEnd !== undefined) {
@@ -1101,8 +1100,8 @@ export class BusPlannerService {
                     stops_sid: route.stops_sid,
                     match_range: [sIdx, firstValidEnd]
                 });
-                // 靽格迤嚗宏??break嚗匱蝥炎?乩?銝??startIndices
-                // 靘?嚗?頝舐??函洵 5 蝡?蝚?20 蝡蝬??楚瘞氬??抵?航?臬?瘜?銝?暺?
+                // ?�格迤�?�???break?�?�蝥?��??�??�??startIndices
+                // ?��???�??��????�洵 5 ?��????20 ?��??�蝬????��??�氬?????�?��???��?????�??��????
             }
         }
     }
@@ -1112,7 +1111,7 @@ export class BusPlannerService {
   // --- Network Logic ---
 
   /**
-   * ?寞活??隢?隞交?嗡蔥?潮? (璅⊥ Python ??asyncio + batch logic)
+   * ?寞活????��???�交???�蔥?�? (?�⊥??Python ??asyncio + batch logic)
    */
   private async batchProcess<T, R>(
     items: T[], 
@@ -1143,12 +1142,12 @@ export class BusPlannerService {
         const $ = cheerio.load(resHtml);
         const routeMap: Record<string, { route: string; rid: string; direction: string }> = {};
 
-        // 閫?? HTML 銵冽撱箇? rid 撠銵剁???孵?鞈?嚗?
+        // ??? HTML ?�冽撱�? rid ?��??�銵????��??�??�???
         $('tr').each((_, row) => {
             const $row = $(row);
             const cols = $row.find('td');
             
-            // ?閬撠?3 ??雿?頝舐????????
+            // ???�?��??3 ????�??��???�???��???��???
             if (cols.length < 3) return;
             
             const link = $row.find('a[href*="route.jsp"]').first();
@@ -1158,7 +1157,7 @@ export class BusPlannerService {
             const ridMatch = href.match(/rid=(\d+)/);
             const rid = ridMatch ? ridMatch[1] : "";
             
-            // ???孵?鞈?嚗洵 3 ??雿?
+            // ?�??�??�??��?�?3 ????�?
             const direction = $(cols[2]).text().trim();
 
             const dynIdNode = $row.find('[id^="tte"]');
@@ -1176,7 +1175,7 @@ export class BusPlannerService {
 
         const buses: any[] = [];
 
-        // ?游? JSON ??鞈?
+        // ?�? JSON ????�?
         if (resJson && resJson.Stop) {
             for (const item of resJson.Stop) {
                 const vals = (item.n1 || "").split(',');
@@ -1194,7 +1193,7 @@ export class BusPlannerService {
                         route: info.route,
                         rid: info.rid,
                         sid: repSid,
-                        direction: info.direction, // ??孵?鞈?
+                        direction: info.direction, // ??�??�?
                         time_text: timeText,
                         raw_time: TimeParser.parseTextToSeconds(timeText)
                     });
@@ -1202,13 +1201,13 @@ export class BusPlannerService {
             }
         }
 
-        // ???拚?? (?芰頠??∪???
+        // ????????��? (??�???????
         for (const k in routeMap) {
             buses.push({
                 route: routeMap[k].route,
                 rid: routeMap[k].rid,
                 sid: repSid,
-                direction: routeMap[k].direction, // ??孵?鞈?
+                direction: routeMap[k].direction, // ??�??�?
                 time_text: '\u672a\u767c\u8eca',
                 raw_time: CONFIG.TIME_NOT_DEPARTED
             });
@@ -1224,15 +1223,15 @@ export class BusPlannerService {
   // --- Main Business Logic ---
 
   public async plan(startName: string, endName: string): Promise<BusInfo[]> {
-    console.log(`?? [BusPlanner] Planning: ${startName} -> ${endName}`);
+    console.log(`[BusPlanner] Planning: ${startName} -> ${endName}`);
 
-    // 0. Cache Check (?舫)
+    // 0. Cache Check (??��?)
     const cacheKey = `${CONFIG.CACHE_KEY_PREFIX}${startName}|${endName}`;
     try {
         const cached = await AsyncStorage.getItem(cacheKey);
         if (cached) {
             const cachedBuses: BusInfo[] = JSON.parse(cached);
-            console.log("?賭葉敹怠?嚗?唳??葉...");
+            console.log('[BusPlanner] Using cached route plan, refreshing realtime data...');
             return await this.updateCachedBuses(cachedBuses);
         }
     } catch (e) { /* ignore */ }
@@ -1244,8 +1243,8 @@ export class BusPlannerService {
     console.log(`Found ${matchedRoutes.length} static candidates.`);
 
     // 2. Prepare for Realtime Fetching
-    // ?曉???閬閰Ｙ? SLID (?駁?)
-    const slidMap = new Map<string, string>(); // slid -> repSid (隞?”SID)
+    // ??�??????�閰�? SLID (?�?)
+    const slidMap = new Map<string, string>(); // slid -> repSid (???�SID)
     
     matchedRoutes.forEach(r => {
         const startSid = r.stops_sid[r.match_range[0]];
@@ -1266,11 +1265,11 @@ export class BusPlannerService {
     );
     const allRealtimeBuses = nestedResults.flat();
 
-    // 撱箇?敹恍?曇”: SLID -> Array of RealtimeData
+    // ?��???��??�???��? SLID -> Array of RealtimeData
     const realtimeLookup: Record<string, any[]> = {};
     allRealtimeBuses.forEach(b => {
-        // ? realtime data ?芣? rid ??time嚗???閬??撅祆?芸?SLID
-        // ?ㄐ蝔凝 trick嚗?? fetchRealtimeBySlid 鋆∪??乩? sid嚗???sid -> slid
+        // ? realtime data ??? rid ??time?�?????��????��?�??�?SLID
+        // ?�??��???trick?�???� fetchRealtimeBySlid ?�∪??�? sid?�???sid -> slid
         const info = this.getStopInfo(b.sid);
         if (info && info.slid) {
             if (!realtimeLookup[info.slid]) realtimeLookup[info.slid] = [];
@@ -1300,7 +1299,7 @@ export class BusPlannerService {
         const pathStops: StopInfo[] = pathSids.map(sid => {
             const info = this.getStopInfo(sid);
             return {
-                name: info?.name || "?芰",
+                name: info?.name || "??��?",
                 sid: sid,
                 slid: info?.slid,
                 geo: info?.geo
@@ -1315,7 +1314,7 @@ export class BusPlannerService {
             rawTime: rawTime,
             directionText: route.direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b',
             stopCount: pathStops.length - 1,
-            estimatedDuration: Math.ceil((pathStops.length - 1) * 2 + 1), // 隡啁?嚗?蝡???+蝺抵?1??
+            estimatedDuration: Math.ceil((pathStops.length - 1) * 2 + 1), // ?��???�??????+?�抵?1???
             startGeo: pathStops[0].geo,
             endGeo: pathStops[pathStops.length - 1].geo,
             pathStops: pathStops
@@ -1336,23 +1335,23 @@ export class BusPlannerService {
 
     const buses = await this.fetchRealtimeBySlidCached(slid, stopName); // ??slid
 
-    // ???嚗蝙?典?冽?頛嚗?港???雿??
+    // ?????��????�????��??��??�?????��?????
     return buses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async getStopArrivals(stopName: string): Promise<any[]> {
-    // 1. 蝣箔?????
+    // 1. ?????�???
     if (!this.stopDb) {
       console.warn("Service not initialized, loading DB...");
-      // ?交??constructor ?臬?甇亥???JSON嚗ㄐ?臬蕭?伐??交??甇伐??蝣箔? init
+      // ?交�???constructor ????�亥???JSON?�?�???�蕭?�??交�??�??��???????? init
     }
 
-    // 2. ??閰脩????????SID
+    // 2. ?�??�脩???????????SID
     const sids = this.getSidsByName(stopName);
     if (sids.length === 0) return [];
 
-    // 3. ?曉銝?銴? SLID (Stop Location ID) 隞仿??銴?瘙?
-    // ?摩嚗?銝????賣?憭???(SID)嚗?摰?賢鈭怠?銝????皞?(SLID)
+    // 3. ??�?��???�? SLID (Stop Location ID) ?�仿�????�???
+    // ??�摩?�??�?????�?�??�?????(SID)?�??�??�?賢?��??�????????(SLID)
     const slidMap = new Map<string, string>(); // slid -> representative_sid
     
     for (const sid of sids) {
@@ -1364,7 +1363,7 @@ export class BusPlannerService {
       }
     }
 
-    // 4. ?寞活銝西??? (雿輻?Ｘ???batchProcess 璈)
+    // 4. ?寞活?�西???? (?�輻??�???batchProcess ?��???
     const tasks = Array.from(slidMap.entries()).map(([slid, sid]) => ({ slid, sid }));
     
     const nestedResults = await this.batchProcess(
@@ -1372,7 +1371,7 @@ export class BusPlannerService {
       (task) => this.fetchRealtimeBySlidCached(task.slid, task.sid)
     );
 
-    // 5. ?文像蝯?銝行?摨?雿輻?梁瘥??剁?
+    // 5. ??��??��???��???�??�輻??梁�??��?????
     const allBuses = nestedResults.flat();
     return allBuses.sort((a, b) => compareArrivals(a, b));
   }
