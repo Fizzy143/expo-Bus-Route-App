@@ -1,8 +1,10 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  ListRenderItemInfo,
   Platform,
   RefreshControl,
   StyleSheet,
@@ -18,6 +20,9 @@ import {
   RouteDirectionDetails,
   RouteStopArrival,
 } from '../components/busPlanner';
+import { haversineMeters, UserLocation } from '../components/locationService';
+import WebRouteTransitionView from '../components/WebRouteTransitionView';
+import { beginWebRouteTransition } from '../components/web-route-transition';
 
 const DEFAULT_ROUTE_NAME = '606';
 const AUTO_REFRESH_MS = 10000;
@@ -37,6 +42,10 @@ const COMING_TEXT = '\u9032\u7ad9\u4e2d';
 const SOON_TEXT = '\u5c07\u5230\u7ad9';
 const GO_TEXT = '\u53bb\u7a0b';
 const BACKWARD_TEXT = '\u8fd4\u7a0b';
+const MINUTE_UNIT_TEXT = '\u5206';
+const STOP_ROW_HEIGHT = 66;
+const CENTER_RETRY_DELAY_MS = 120;
+const MAX_CENTER_RETRIES = 4;
 
 function normalizeDirectionText(direction: number, text?: string): string {
   if (text === GO_TEXT || text === BACKWARD_TEXT) {
@@ -111,9 +120,13 @@ function hasDirectionLoaded(direction: RouteDirectionDetails | undefined): boole
 export default function BusRouteDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ routeName?: string | string[] }>();
+  const pageTransitionRef = useRef<HTMLElement | null>(null);
   const plannerRef = useRef(new BusPlannerService());
   const pagerRef = useRef<PagerView>(null);
   const selectedDirectionRef = useRef(0);
+  const directionListRefs = useRef<Record<number, FlatList<RouteStopArrival> | null>>({});
+  const pendingCenterDirectionsRef = useRef(new Set<number>());
+  const hasAutoCenteredInitialRef = useRef(false);
 
   const routeName = useMemo(() => {
     if (Array.isArray(params.routeName)) {
@@ -129,10 +142,74 @@ export default function BusRouteDetailScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [errorText, setErrorText] = useState('');
   const [lastUpdate, setLastUpdate] = useState('');
+  const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
+  const [locationReady, setLocationReady] = useState(false);
+  const [nearestStopIndexByDirection, setNearestStopIndexByDirection] = useState<Record<number, number>>(
+    {}
+  );
 
-  const currentDirectionData = directionData[selectedDirection];
+  const queueCenterDirection = useCallback((direction: number) => {
+    if (Platform.OS !== 'web') {
+      return;
+    }
+
+    pendingCenterDirectionsRef.current.add(direction);
+  }, []);
+
+  const centerNearestStop = useCallback(
+    (direction: number, retryCount = 0) => {
+      if (Platform.OS !== 'web') {
+        return;
+      }
+
+      const nearestIndex = nearestStopIndexByDirection[direction];
+      if (nearestIndex === undefined) {
+        return;
+      }
+
+      const list = directionListRefs.current[direction];
+      if (!list) {
+        if (retryCount < MAX_CENTER_RETRIES) {
+          setTimeout(() => centerNearestStop(direction, retryCount + 1), CENTER_RETRY_DELAY_MS);
+        }
+        return;
+      }
+
+      try {
+        list.scrollToIndex({
+          animated: true,
+          index: nearestIndex,
+          viewPosition: 0.5,
+        });
+        pendingCenterDirectionsRef.current.delete(direction);
+      } catch {
+        if (retryCount < MAX_CENTER_RETRIES) {
+          setTimeout(() => centerNearestStop(direction, retryCount + 1), CENTER_RETRY_DELAY_MS);
+        }
+      }
+    },
+    [nearestStopIndexByDirection]
+  );
+
+  const handleScrollToIndexFailed = useCallback(
+    (direction: number, averageItemLength?: number, index?: number) => {
+      const list = directionListRefs.current[direction];
+      if (!list || index === undefined) {
+        return;
+      }
+
+      list.scrollToOffset({
+        animated: true,
+        offset: Math.max((averageItemLength || STOP_ROW_HEIGHT) * index, 0),
+      });
+
+      setTimeout(() => centerNearestStop(direction, 1), CENTER_RETRY_DELAY_MS);
+    },
+    [centerNearestStop]
+  );
 
   const handleBackPress = () => {
+    beginWebRouteTransition(pageTransitionRef.current, '/', 'back');
     if (Platform.OS === 'web' && typeof window !== 'undefined' && window.history.length <= 1) {
       router.replace('/');
       return;
@@ -237,6 +314,12 @@ export default function BusRouteDetailScreen() {
     setSelectedDirection(0);
     setRouteDetails(null);
     setDirectionData([]);
+    setUserLocation(null);
+    setLocationReady(false);
+    setNearestStopIndexByDirection({});
+    directionListRefs.current = {};
+    pendingCenterDirectionsRef.current.clear();
+    hasAutoCenteredInitialRef.current = false;
     loadRouteDetails();
 
     const interval = setInterval(() => {
@@ -246,6 +329,102 @@ export default function BusRouteDetailScreen() {
     return () => clearInterval(interval);
   }, [loadRouteDetails]);
 
+  useEffect(() => {
+    if (Platform.OS !== 'web') {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadUserLocation = async () => {
+      try {
+        const permission = await Location.getForegroundPermissionsAsync();
+        if (permission.status !== 'granted') {
+          if (!cancelled) {
+            setLocationReady(true);
+          }
+          return;
+        }
+
+        const location = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+
+        if (!cancelled) {
+          setUserLocation({
+            lat: location.coords.latitude,
+            lon: location.coords.longitude,
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to resolve bus-route location:', error);
+      } finally {
+        if (!cancelled) {
+          setLocationReady(true);
+        }
+      }
+    };
+
+    void loadUserLocation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [routeName]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !locationReady || !userLocation || directionData.length === 0) {
+      return;
+    }
+
+    const nextNearest: Record<number, number> = {};
+
+    directionData.forEach(direction => {
+      let nearestIndex = -1;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+
+      direction.stops.forEach((stop, index) => {
+        const geo = plannerRef.current.getGeoBySid(stop.sid);
+        if (!geo) {
+          return;
+        }
+
+        const distance = haversineMeters(userLocation.lat, userLocation.lon, geo.lat, geo.lon);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = index;
+        }
+      });
+
+      if (nearestIndex >= 0) {
+        nextNearest[direction.direction] = nearestIndex;
+      }
+    });
+
+    setNearestStopIndexByDirection(nextNearest);
+  }, [directionData, locationReady, userLocation]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !locationReady) {
+      return;
+    }
+
+    if (!hasAutoCenteredInitialRef.current && nearestStopIndexByDirection[selectedDirection] !== undefined) {
+      queueCenterDirection(selectedDirection);
+      hasAutoCenteredInitialRef.current = true;
+    }
+
+    if (pendingCenterDirectionsRef.current.has(selectedDirection)) {
+      centerNearestStop(selectedDirection);
+    }
+  }, [
+    centerNearestStop,
+    locationReady,
+    nearestStopIndexByDirection,
+    queueCenterDirection,
+    selectedDirection,
+  ]);
+
   const onRefresh = () => {
     setRefreshing(true);
     loadRouteDetails(true);
@@ -253,6 +432,7 @@ export default function BusRouteDetailScreen() {
 
   const handleDirectionChange = (index: number) => {
     updateSelectedDirection(index);
+    queueCenterDirection(index);
     void ensureDirectionLoaded(index);
   };
 
@@ -265,7 +445,7 @@ export default function BusRouteDetailScreen() {
       badgeStyle = styles.badgeRed;
     } else if (stop.rawTime > 0 && stop.rawTime <= 180) {
       badgeStyle = styles.badgeSoftRed;
-      isSoftRedMinutes = /^\d+\s*分$/.test(text);
+      isSoftRedMinutes = /^\d+\s*\D*$/.test(text);
     } else if (text === LOADING_TEXT) {
       badgeStyle = styles.badgeGray;
     } else if (/\d/.test(text)) {
@@ -273,14 +453,14 @@ export default function BusRouteDetailScreen() {
     }
 
     if (isSoftRedMinutes) {
-      const matched = text.match(/^(\d+)\s*分$/);
+      const matched = text.match(/^(\d+)/);
       const minuteValue = matched?.[1] ?? text;
 
       return (
         <View style={[styles.badgeBase, styles.badgeSoftRed, styles.badgeSoftRedWide]}>
           <Text style={styles.badgeSoftRedText}>
             <Text style={styles.badgeSoftRedNumber}>{minuteValue}</Text>
-            <Text style={styles.badgeSoftRedUnit}> 分</Text>
+            <Text style={styles.badgeSoftRedUnit}> {MINUTE_UNIT_TEXT}</Text>
           </Text>
         </View>
       );
@@ -293,24 +473,40 @@ export default function BusRouteDetailScreen() {
     );
   };
 
-  const renderStopItem = ({ item, index }: { item: RouteStopArrival; index: number }) => {
-    const stopCount = currentDirectionData?.stops.length || 0;
+  const renderStopItem = (direction: RouteDirectionDetails, item: RouteStopArrival, index: number) => {
+    const stopCount = direction.stops.length;
     const isTerminal = index === 0 || index === stopCount - 1;
+    const isNearest =
+      Platform.OS === 'web' &&
+      locationReady &&
+      nearestStopIndexByDirection[direction.direction] === index;
 
     return (
-      <View style={styles.stopRow}>
+      <View style={[styles.stopRow, isNearest && styles.stopRowNearest]}>
         <View style={styles.stopMarkerColumn}>
           <View
             style={[
               styles.stopMarker,
               isTerminal ? styles.stopMarkerTerminal : styles.stopMarkerNormal,
+              isNearest && styles.stopMarkerCurrent,
             ]}
           />
           {index !== stopCount - 1 && <View style={styles.stopConnector} />}
         </View>
 
         <View style={styles.stopNameColumn}>
-          <Text style={[styles.stopName, isTerminal && styles.stopNameTerminal]}>{item.name}</Text>
+          <View style={styles.stopNameInner}>
+            {isNearest ? <View style={styles.currentLocationDot} /> : null}
+            <Text
+              style={[
+                styles.stopName,
+                isTerminal && styles.stopNameTerminal,
+                isNearest && styles.stopNameNearest,
+              ]}
+            >
+              {item.name}
+            </Text>
+          </View>
         </View>
 
         <View style={styles.stopEtaColumn}>{renderBadge(item)}</View>
@@ -321,94 +517,113 @@ export default function BusRouteDetailScreen() {
   const tabDirections = directionData.length > 0 ? directionData : routeDetails?.directions || [];
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={handleBackPress} style={styles.headerButton}>
-          <Text style={styles.headerButtonText}>{BACK_TEXT}</Text>
-        </TouchableOpacity>
+    <WebRouteTransitionView backgroundColor="#152021" containerRef={pageTransitionRef}>
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleBackPress} style={styles.headerButton}>
+            <Text style={styles.headerButtonText}>{BACK_TEXT}</Text>
+          </TouchableOpacity>
 
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>{routeName}</Text>
-          <Text style={styles.headerSubtitle}>{PAGE_TITLE}</Text>
+          <View style={styles.headerCenter}>
+            <Text style={styles.headerTitle}>{routeName}</Text>
+            <Text style={styles.headerSubtitle}>{PAGE_TITLE}</Text>
+          </View>
+
+          <TouchableOpacity onPress={onRefresh} style={styles.headerButton} disabled={refreshing}>
+            <Text style={styles.headerButtonText}>{refreshing ? REFRESHING_TEXT : REFRESH_TEXT}</Text>
+          </TouchableOpacity>
         </View>
 
-        <TouchableOpacity onPress={onRefresh} style={styles.headerButton} disabled={refreshing}>
-          <Text style={styles.headerButtonText}>{refreshing ? REFRESHING_TEXT : REFRESH_TEXT}</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.tabBar}>
-        {tabDirections.map((direction, index) => (
-          <TouchableOpacity
-            key={`${direction.rid}-${direction.direction}`}
-            style={[styles.tabButton, selectedDirection === index && styles.tabButtonActive]}
-            onPress={() => {
-              handleDirectionChange(index);
-              pagerRef.current?.setPage(index);
-            }}
-          >
-            <Text
-              style={[
-                styles.tabButtonText,
-                selectedDirection === index && styles.tabButtonTextActive,
-              ]}
+        <View style={styles.tabBar}>
+          {tabDirections.map((direction, index) => (
+            <TouchableOpacity
+              key={`${direction.rid}-${direction.direction}`}
+              style={[styles.tabButton, selectedDirection === index && styles.tabButtonActive]}
+              onPress={() => {
+                handleDirectionChange(index);
+                pagerRef.current?.setPage(index);
+              }}
             >
-              {normalizeDirectionText(direction.direction, direction.directionText)}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+              <Text
+                style={[
+                  styles.tabButtonText,
+                  selectedDirection === index && styles.tabButtonTextActive,
+                ]}
+              >
+                {normalizeDirectionText(direction.direction, direction.directionText)}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#6F73F8" />
-          <Text style={styles.loadingText}>{`${LOADING_TEXT} ${routeName}...`}</Text>
-        </View>
-      ) : errorText ? (
-        <View style={styles.emptyContainer}>
-          <Text style={styles.emptyTitle}>{errorText}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={() => loadRouteDetails()}>
-            <Text style={styles.retryButtonText}>{RELOAD_TEXT}</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <View style={styles.content}>
-          <PagerView
-            ref={pagerRef}
-            style={styles.pager}
-            initialPage={0}
-            onPageSelected={event => handleDirectionChange(event.nativeEvent.position)}
-          >
-            {directionData.map(direction => (
-              <View key={`${direction.rid}-${direction.direction}`} style={styles.page}>
-                <View style={styles.directionHeader}>
-                  <Text style={styles.directionTitle}>
-                    {routeName} {normalizeDirectionText(direction.direction, direction.directionText)}
-                  </Text>
-                  <Text style={styles.directionMeta}>{`${direction.stops.length}${STOPS_SUFFIX}`}</Text>
+        {loading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#6F73F8" />
+            <Text style={styles.loadingText}>{`${LOADING_TEXT} ${routeName}...`}</Text>
+          </View>
+        ) : errorText ? (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyTitle}>{errorText}</Text>
+            <TouchableOpacity style={styles.retryButton} onPress={() => loadRouteDetails()}>
+              <Text style={styles.retryButtonText}>{RELOAD_TEXT}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.content}>
+            <PagerView
+              ref={pagerRef}
+              style={styles.pager}
+              initialPage={0}
+              onPageSelected={event => handleDirectionChange(event.nativeEvent.position)}
+            >
+              {directionData.map(direction => (
+                <View key={`${direction.rid}-${direction.direction}`} style={styles.page}>
+                  <View style={styles.directionHeader}>
+                    <Text style={styles.directionTitle}>
+                      {routeName} {normalizeDirectionText(direction.direction, direction.directionText)}
+                    </Text>
+                    <Text style={styles.directionMeta}>{`${direction.stops.length}${STOPS_SUFFIX}`}</Text>
+                  </View>
+
+                  <FlatList
+                    ref={ref => {
+                      directionListRefs.current[direction.direction] = ref;
+                    }}
+                    data={direction.stops}
+                    keyExtractor={item => item.sid}
+                    renderItem={({ item, index }: ListRenderItemInfo<RouteStopArrival>) =>
+                      renderStopItem(direction, item, index)
+                    }
+                    contentContainerStyle={styles.listContent}
+                    getItemLayout={(_, index) => ({
+                      index,
+                      length: STOP_ROW_HEIGHT,
+                      offset: STOP_ROW_HEIGHT * index,
+                    })}
+                    onScrollToIndexFailed={info =>
+                      handleScrollToIndexFailed(
+                        direction.direction,
+                        info.averageItemLength,
+                        info.index
+                      )
+                    }
+                    refreshControl={
+                      Platform.OS !== 'web' ? (
+                        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+                      ) : undefined
+                    }
+                  />
                 </View>
+              ))}
+            </PagerView>
+          </View>
+        )}
 
-                <FlatList
-                  data={direction.stops}
-                  keyExtractor={item => item.sid}
-                  renderItem={renderStopItem}
-                  contentContainerStyle={styles.listContent}
-                  refreshControl={
-                    Platform.OS !== 'web' ? (
-                      <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-                    ) : undefined
-                  }
-                />
-              </View>
-            ))}
-          </PagerView>
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>{`${LAST_UPDATED_TEXT}${lastUpdate || '--:--:--'}`}</Text>
         </View>
-      )}
-
-      <View style={styles.footer}>
-        <Text style={styles.footerText}>{`${LAST_UPDATED_TEXT}${lastUpdate || '--:--:--'}`}</Text>
       </View>
-    </View>
+    </WebRouteTransitionView>
   );
 }
 
@@ -507,7 +722,11 @@ const styles = StyleSheet.create({
   stopRow: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    minHeight: 66,
+    minHeight: STOP_ROW_HEIGHT,
+    borderRadius: 18,
+  },
+  stopRowNearest: {
+    backgroundColor: 'rgba(111, 115, 248, 0.12)',
   },
   stopMarkerColumn: {
     width: 28,
@@ -528,6 +747,13 @@ const styles = StyleSheet.create({
     height: 12,
     borderRadius: 6,
   },
+  stopMarkerCurrent: {
+    shadowColor: '#6F73F8',
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 4,
+  },
   stopConnector: {
     width: 2,
     flex: 1,
@@ -541,6 +767,20 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#223033',
   },
+  stopNameInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  currentLocationDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: '#6F73F8',
+    borderWidth: 2,
+    borderColor: '#dbe0ff',
+    flexShrink: 0,
+  },
   stopName: {
     color: '#dde7e7',
     fontSize: 16,
@@ -549,6 +789,9 @@ const styles = StyleSheet.create({
   stopNameTerminal: {
     color: '#fff',
     fontWeight: '700',
+  },
+  stopNameNearest: {
+    color: '#ffffff',
   },
   stopEtaColumn: {
     justifyContent: 'center',

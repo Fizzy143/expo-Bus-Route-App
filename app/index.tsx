@@ -25,6 +25,8 @@ import { FavoriteRoute, favoriteRoutesService } from '../components/favoriteRout
 import InstallPWA from '../components/InstallPWA';
 import NotificationSettings from '../components/NotificationSettings';
 import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
+import WebRouteTransitionView from '../components/WebRouteTransitionView';
+import { beginWebRouteTransition } from '../components/web-route-transition';
 import { compareArrivals } from '../utils/routeSorter';
 
 // 定義 UI 用的介面 (配合新 API 的回傳結構進行適配)
@@ -39,6 +41,7 @@ interface UIArrival {
 export default function StopScreen() {
   const router = useRouter();
   const { name } = useLocalSearchParams<{ name?: string }>();
+  const pageTransitionRef = useRef<HTMLElement | null>(null);
 
   // 使用新版 Service
   const plannerRef = useRef(new BusPlannerService());
@@ -123,10 +126,16 @@ export default function StopScreen() {
       return;
     }
 
+    beginWebRouteTransition(pageTransitionRef.current, '/bus-route', 'forward');
     router.push({
       pathname: '/bus-route' as any,
       params: { routeName: normalizedRouteName },
     });
+  };
+
+  const openRoutePlanner = () => {
+    beginWebRouteTransition(pageTransitionRef.current, '/route', 'forward');
+    router.push('/route');
   };
 
   // 在應用啟動時請求位置權限
@@ -857,6 +866,7 @@ export default function StopScreen() {
   );
 
   return (
+    <WebRouteTransitionView backgroundColor="#152021" containerRef={pageTransitionRef}>
     <View style={styles.container}>
       {/* 側欄 */}
       <Animated.View
@@ -1094,7 +1104,7 @@ export default function StopScreen() {
           )}
           <TouchableOpacity 
             style={styles.addRouteButtonInline}
-            onPress={() => router.push('/route')}
+            onPress={openRoutePlanner}
             activeOpacity={0.7}
           >
             <Text style={styles.addRouteButtonText}>+</Text>
@@ -1284,6 +1294,7 @@ export default function StopScreen() {
         </TouchableOpacity>
       </Modal>
     </View>
+    </WebRouteTransitionView>
   );
 }
 

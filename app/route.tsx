@@ -16,6 +16,8 @@ import {
 import type { BusInfo } from '../components/busPlanner';
 import { BusPlannerService } from '../components/busPlanner';
 import { favoriteRoutesService } from '../components/favoriteRoutes';
+import WebRouteTransitionView from '../components/WebRouteTransitionView';
+import { beginWebRouteTransition } from '../components/web-route-transition';
 import stopMapRaw from '../databases/stop_id_map.json';
 
 interface StopMap {
@@ -27,6 +29,7 @@ const stopData = stopMapRaw as StopMap;
 export default function RouteScreen() {
   const router = useRouter();
   const { from, to } = useLocalSearchParams<{ from?: string; to?: string }>();
+  const pageTransitionRef = useRef<HTMLElement | null>(null);
   const plannerRef = useRef(new BusPlannerService());
   const searchInputRef = useRef<any>(null);
   
@@ -361,6 +364,7 @@ export default function RouteScreen() {
 
   // 返回
   const back = () => {
+    beginWebRouteTransition(pageTransitionRef.current, '/', 'back');
     if (router.canGoBack()) {
       setTimeout(() => router.back(), 100);
     } else {
@@ -497,6 +501,7 @@ export default function RouteScreen() {
   };
 
   return (
+    <WebRouteTransitionView backgroundColor="#f5f5f5" containerRef={pageTransitionRef}>
     <View style={styles.container}>
       {/* 頂部導航 */}
       <View style={styles.header}>
@@ -637,6 +642,7 @@ export default function RouteScreen() {
 
       {renderSearchModal()}
     </View>
+    </WebRouteTransitionView>
   );
 }
 
