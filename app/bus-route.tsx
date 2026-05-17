@@ -34,7 +34,7 @@ const NOT_FOUND_SUFFIX = ' \u8def\u7dda\u8cc7\u6599';
 const LAST_UPDATED_TEXT = '\u4e0a\u6b21\u66f4\u65b0\uff1a';
 const STOPS_SUFFIX = ' \u7ad9';
 const COMING_TEXT = '\u9032\u7ad9\u4e2d';
-const SOON_TEXT = '\u5373\u5c07\u5230\u7ad9';
+const SOON_TEXT = '\u5c07\u5230\u7ad9';
 const GO_TEXT = '\u53bb\u7a0b';
 const BACKWARD_TEXT = '\u8fd4\u7a0b';
 

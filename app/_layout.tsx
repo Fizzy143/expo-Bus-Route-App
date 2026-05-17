@@ -1,39 +1,80 @@
-import { Stack } from 'expo-router';
+import { Stack, usePathname } from 'expo-router';
 import { useEffect } from 'react';
 import { Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 export default function Layout() {
-  // 在 Web 上添加全局 CSS 動畫
+  const pathname = usePathname();
+
+  // Add web-only route transitions tuned for mobile PWA usage.
   useEffect(() => {
-    if (Platform.OS === 'web') {
-      const style = document.createElement('style');
-      style.textContent = `
-        /* 頁面切換動畫 */
-        #root > div {
-          transition: opacity 0.2s ease-in-out;
-        }
-        
-        /* 確保動畫應用到所有路由容器 */
-        [data-expo-router-container] {
-          animation: fadeIn 0.2s ease-in-out;
-        }
-        
-        @keyframes fadeIn {
-          from {
-            opacity: 0;
-          }
-          to {
-            opacity: 1;
-          }
-        }
-      `;
-      document.head.appendChild(style);
-      return () => {
-        document.head.removeChild(style);
-      };
+    if (Platform.OS !== 'web') {
+      return;
     }
+
+    const style = document.createElement('style');
+    style.textContent = `
+      #root > div {
+        background: #152021;
+      }
+
+      [data-expo-router-container] {
+        will-change: opacity, transform;
+        transform-origin: center center;
+      }
+
+      [data-expo-router-container].route-transition-enter {
+        animation: routeSlideIn 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+
+      @keyframes routeSlideIn {
+        from {
+          opacity: 0.35;
+          transform: translate3d(72px, 0, 0) scale(0.985);
+        }
+        to {
+          opacity: 1;
+          transform: translate3d(0, 0, 0) scale(1);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        [data-expo-router-container].route-transition-enter {
+          animation-duration: 0.01ms;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+    return () => {
+      document.head.removeChild(style);
+    };
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') {
+      return;
+    }
+
+    const container = document.querySelector('[data-expo-router-container]');
+    if (!(container instanceof HTMLElement)) {
+      return;
+    }
+
+    container.classList.remove('route-transition-enter');
+    void container.offsetWidth;
+    container.classList.add('route-transition-enter');
+
+    const handleAnimationEnd = () => {
+      container.classList.remove('route-transition-enter');
+    };
+
+    container.addEventListener('animationend', handleAnimationEnd);
+    return () => {
+      container.removeEventListener('animationend', handleAnimationEnd);
+      container.classList.remove('route-transition-enter');
+    };
+  }, [pathname]);
 
   return (
     <SafeAreaProvider>
@@ -41,8 +82,7 @@ export default function Layout() {
         screenOptions={{
           headerShown: false,
           animation: 'fade',
-          animationDuration: 200,
-          // 為手機裝置配置內容樣式，預留狀態欄空間
+          animationDuration: 420,
           contentStyle: {
             backgroundColor: '#152021',
           },

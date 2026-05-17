@@ -1,18 +1,19 @@
 /**
  * BusPlannerService.ts
- * ?˜é????busPlanner.py (Refactored Version)
+ * Refactored from the original busPlanner.py flow.
  * Environment: React Native (Expo SDK 54+) / Node 20+
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as cheerio from 'cheerio';
 
-// ??¬èº«?î©“ï…³??JSON ?¼î???¿ï?î¡“æ????¯î???å?è¿¤è£ç®??¿ï???// ?äº™î¯­ Expo ?å“¨??¢ï??¡é½î³‹Â€î©??¼î???ï????”ä?? î???Bundle ?­æ???—ï—º?????å¯§î? expo-file-system ?ï??
+// Local static datasets are bundled with the app so route topology can be
+// resolved without fetching extra files at runtime.
 import routeDataRaw from '../databases/metro_bus_routes.json';
 import stopDataRaw from '../databases/stop_id_map_v3.json';
 import { compareArrivals } from '../utils/routeSorter';
 
-// ========== ?¿îµ¤??°î«²??(??·ï…± busPlanner.ts) ==========
+// ========== Shared types ==========
 
 export interface GeoLocation {
   lat: number;
@@ -29,12 +30,12 @@ export interface StopInfo {
 export interface BusInfo {
   routeName: string;
   rid: string;
-  sid: string; // ?î©???????¡î?? ID
+  sid: string; // stop id
   arrivalTimeText: string;
-  rawTime: number; // ??½î????
+  rawTime: number; // normalized ETA in seconds
   directionText: string;
   stopCount: number;
-  estimatedDuration?: number; // ??æ‘¯????î¿??—ï???î§€?
+  estimatedDuration?: number; // rough duration estimate in minutes
   startGeo?: GeoLocation;
   endGeo?: GeoLocation;
   pathStops: StopInfo[];
@@ -61,7 +62,7 @@ export interface RouteDetails {
   directions: RouteDirectionDetails[];
 }
 
-// ??½î??î°??è???å¯???‘è??ï????
+// Static route candidate matched from local route topology.
 interface StaticRouteMatch {
   route_name: string;
   rid: string;
@@ -105,10 +106,10 @@ interface CachedTaipeiRouteStopMapping {
 }
 
 
-// ========== ??™è”­??©è???==========
+// ========== Runtime config ==========
 
 const CONFIG = {
-  // ?¿è¼»??Python ??? Proxy ?®å??
+  // Legacy Taipei e-bus proxy endpoints used for the MQS fallback path.
   BASE_URL: "https://api.codetabs.com/v1/proxy?quest=https://pda5284.gov.taipei/MQS",
   TAIPEI_ESTIMATE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetEstimateTime.gz',
   TAIPEI_ROUTE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz',
@@ -180,16 +181,16 @@ class TimeParser {
     const seconds = parseInt(codeStr, 10);
     if (isNaN(seconds)) return BusStatus.UNKNOWN;
     if (seconds < 0) return BusStatus.NOT_DEPARTED;
-    if (seconds < 180) return '\u5373\u5c07\u5230\u7ad9';
+    if (seconds < 180) return '\u5c07\u5230\u7ad9';
 
     return `${Math.floor(seconds / 60)}\u5206`;
   }
 }
 
-// ========== ?è©???? ==========
+// ========== Core service ==========
 
 export class BusPlannerService {
-  // ?ˆï‹ª??¨æ€??½ï????stop_id_map_v3.json
+  // stop_id_map_v3.json structure:
   private stopDb: {
     g: number[][]; // Geo Pool
     n: Record<string, string[]>; // Name Index
@@ -207,8 +208,8 @@ export class BusPlannerService {
   private taipeiStopInFlight: Promise<TaipeiStopRow[]> | null = null;
 
   constructor() {
-    // ??React Native ?å“¨?JSON import ????‡äº¦??—ï—¼????îµ??‡ä???ªï??
-    // ?¿îµ¤?????äº¦æ³????î©???
+    // Route and stop datasets are imported at build time.
+    // The service only keeps references to those in-memory datasets here.
     this.stopDb = stopDataRaw as any;
     this.routeDb = routeDataRaw as any[];
   }
@@ -827,12 +828,13 @@ export class BusPlannerService {
     return direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b';
   }
 
-  // --- Public API Methods (?†î°ª? Vercel ??‡î¯±?»ç????“î??? ---
+
+  // --- Public API Methods ---
 
   /**
-   * ?î¡???? SID ??’î¯µ?????
-   * @param sid ?¡î?? ID
-   * @returns ????¿ï????undefined
+   * Resolve geo coordinates for a stop SID.
+   * @param sid stop id
+   * @returns coordinates or undefined
    */
   public getGeoBySid(sid: string): GeoLocation | undefined {
     const info = this.getStopInfo(sid);
@@ -840,17 +842,16 @@ export class BusPlannerService {
   }
 
   /**
-   * ?î¡???????????
-   * @returns ?¡î?????
+   * Return every stop name known to the local stop database.
    */
   public getAllStopNames(): string[] {
     return Object.keys(this.stopDb.n);
   }
 
   /**
-   * ?î¡??????? SID ?î¤œâ€å??†îª????´ï‹«? SLID??
-   * @param name ?¡î??
-   * @returns ?????SID ???
+   * Get representative SIDs for a stop name.
+   * Multiple SIDs may map to the same SLID, so this method deduplicates
+   * by SLID to reduce duplicate realtime requests.
    */
   public getRepresentativeSids(name: string): string[] {
     const allSids = this.getSidsByName(name);
@@ -868,14 +869,12 @@ export class BusPlannerService {
         representatives.push(sid);
       }
     }
+
     return representatives;
   }
 
   /**
-   * ? ï????é¤ˆî•­??¡î??
-   * @param userLat ?¿è¼»???±æ???
-   * @param userLon ?¿è¼»??????
-   * @returns ??é¤ˆî•­???? null
+   * Find the nearest stop name from a user location.
    */
   public findNearestStop(userLat: number, userLon: number): string | null {
     const stopNames = this.getAllStopNames();
@@ -900,14 +899,13 @@ export class BusPlannerService {
   }
 
   /**
-   * ?®ï?????????ï½?Haversine ?????
-   * @private
+   * Calculate straight-line distance with the Haversine formula.
    */
   private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371; // ?????€??—ï?????
+    const R = 6371; // earth radius in km
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = 
+    const a =
       Math.sin(dLat / 2) * Math.sin(dLat / 2) +
       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
       Math.sin(dLon / 2) * Math.sin(dLon / 2);
@@ -916,9 +914,7 @@ export class BusPlannerService {
   }
 
   /**
-   * ?î¡??è???¯î???ˆï‹¬?
-   * @param rid ?è?? ID
-   * @returns ?è???¯î????undefined
+   * Return the static structure for a route RID.
    */
   public getRouteStructure(rid: string): any {
     const route = this.routeDb.find(r => r.rid === rid);
@@ -928,7 +924,7 @@ export class BusPlannerService {
       routeName: route.route_name,
       rid: route.rid,
       direction: route.direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b',
-      goStops: route.direction === 0 
+      goStops: route.direction === 0
         ? route.stops_sid.map((sid: string) => {
             const info = this.getStopInfo(sid);
             return { name: info?.name || 'Unknown', sid };
@@ -944,9 +940,7 @@ export class BusPlannerService {
   }
 
   /**
-   * ????å­? SID ??’ï…¶? ï??????è©¨æ???? API??
-   * @param sid ?¡î?? ID
-   * @returns ?ç¥??ˆï‹¬????
+   * Build static route-detail data for a route name.
    */
   public getRouteByName(routeName: string): RouteDetails | undefined {
     const routes = this.routeDb
@@ -975,7 +969,6 @@ export class BusPlannerService {
       })),
     };
   }
-
   public async getRouteStopArrivals(
     routeName: string,
     direction: number
@@ -1052,11 +1045,11 @@ export class BusPlannerService {
     const slid = info.slid;
 
     if (!slid) {
-      console.warn(`[BusPlanner] SID ${sid} ?î??? ï????SLID`);
+      console.warn(`[BusPlanner] SID ${sid} is missing a usable SLID`);
       return [];
     }
 
-    // ?¿è¼»??????SLID ?äº¥å²·?å¯?
+    // Reuse the stop SLID directly when the caller already resolved it.
     return this.getArrivalsBySlid(slid, stopName);
   }
 
@@ -1065,31 +1058,31 @@ export class BusPlannerService {
     const endSids = new Set(this.getSidsByName(endName));
 
     if (startSids.size === 0 || endSids.size === 0) {
-        console.warn(`[BusPlanner] ???????? ${startName} ??${endName}`);
+        console.warn(`[BusPlanner] Could not resolve stop pair: ${startName} -> ${endName}`);
         return [];
     }
 
     const candidates: StaticRouteMatch[] = [];
 
-    // ??˜é¢¨????¦æ???
+    // Scan every static route for valid start/end index pairs.
     for (const route of this.routeDb) {
         const stops: string[] = route.stops_sid;
         
-        // 1. ??‰ïŠ¾?è???å????¥æ³µ??„Â€?½çµ²?ºîµ¤??”æ?????¿ï??­è?ï¼?
+        // 1. Collect every index where the route passes the start stop.
         const startIndices = stops
             .map((sid, idx) => startSids.has(sid) ? idx : -1)
             .filter(i => i !== -1);
             
-        // 2. ??‰ïŠ¾?è???å????¥æ³µ??„Â€???ºîµ¤??”æ?????¿ï??­è?ï¼?
+        // 2. Collect every index where the route passes the end stop.
         const endIndices = stops
             .map((sid, idx) => endSids.has(sid) ? idx : -1)
             .filter(i => i !== -1);
 
         if (startIndices.length === 0 || endIndices.length === 0) continue;
 
-        // 3. ?????´æ‘© (??Python _match_single_route ? ï??)
+        // 3. Keep only forward-moving matches, equivalent to the old Python logic.
         for (const sIdx of startIndices) {
-            // ??‰ï??°è„°çµ²æšºîµ??ºï????é¤ˆî•­??Â€?????
+            // Use the first end index that appears after the start index.
             const firstValidEnd = endIndices.find(eIdx => eIdx > sIdx);
             
             if (firstValidEnd !== undefined) {
@@ -1100,8 +1093,8 @@ export class BusPlannerService {
                     stops_sid: route.stops_sid,
                     match_range: [sIdx, firstValidEnd]
                 });
-                // ?½æ ¼è¿¤å?î«²å???break?—ï—¼?±è¥?»ç??ä¹??Â€??startIndices
-                // ?˜ï???—î«±??è????½æ´µ 5 ?¡î????20 ?¡î??è¬????»æ??æ°¬?????µÂ€?³ï???ªï?????œîŸ¡??ï????
+                // We keep scanning because the same route may have multiple valid
+                // stop-pair matches across different shared stop variants.
             }
         }
     }
@@ -1111,7 +1104,7 @@ export class BusPlannerService {
   // --- Network Logic ---
 
   /**
-   * ?å¯æ´»????¢ï???äº¤???¡è”¥?æ½? (?…âŠ¥??Python ??asyncio + batch logic)
+   * Run async work in bounded batches to avoid overloading upstream APIs.
    */
   private async batchProcess<T, R>(
     items: T[], 
@@ -1142,12 +1135,12 @@ export class BusPlannerService {
         const $ = cheerio.load(resHtml);
         const routeMap: Record<string, { route: string; rid: string; direction: string }> = {};
 
-        // ??? HTML ?µå†½î¹µæ’±ç®? rid ? ï??±éŠµ????¯î??å­??ˆï‹¬???
+        // Parse route id + direction metadata from the stop HTML.
         $('tr').each((_, row) => {
             const $row = $(row);
             const cols = $row.find('td');
             
-            // ???¬î¼¾?·æ??3 ????¿ïš¡??è???î¼???¸Â€î¼¼î???©Â€î¼???
+            // Ignore rows without the expected route / direction columns.
             if (cols.length < 3) return;
             
             const link = $row.find('a[href*="route.jsp"]').first();
@@ -1157,7 +1150,7 @@ export class BusPlannerService {
             const ridMatch = href.match(/rid=(\d+)/);
             const rid = ridMatch ? ridMatch[1] : "";
             
-            // ?î¡??å­??ˆï‹¬??—ï?æ´?3 ????¿ïš¡?
+            // Direction text is rendered in the third column.
             const direction = $(cols[2]).text().trim();
 
             const dynIdNode = $row.find('[id^="tte"]');
@@ -1175,7 +1168,7 @@ export class BusPlannerService {
 
         const buses: any[] = [];
 
-        // ?æ¸? JSON ????ˆï‹ª?
+        // Merge the realtime JSON payload with the parsed route metadata.
         if (resJson && resJson.Stop) {
             for (const item of resJson.Stop) {
                 const vals = (item.n1 || "").split(',');
@@ -1193,7 +1186,7 @@ export class BusPlannerService {
                         route: info.route,
                         rid: info.rid,
                         sid: repSid,
-                        direction: info.direction, // ?îºï…¯?å­??ˆï‹¬?
+                        direction: info.direction,
                         time_text: timeText,
                         raw_time: TimeParser.parseTextToSeconds(timeText)
                     });
@@ -1201,13 +1194,13 @@ export class BusPlannerService {
             }
         }
 
-        // ????????±î? (??°î¨ª???????
+        // Keep missing realtime entries as "?èŠ°î¨ªé  ? so the UI can still show the line.
         for (const k in routeMap) {
             buses.push({
                 route: routeMap[k].route,
                 rid: routeMap[k].rid,
                 sid: repSid,
-                direction: routeMap[k].direction, // ?îºï…¯?å­??ˆï‹¬?
+                direction: routeMap[k].direction,
                 time_text: '\u672a\u767c\u8eca',
                 raw_time: CONFIG.TIME_NOT_DEPARTED
             });
@@ -1225,7 +1218,7 @@ export class BusPlannerService {
   public async plan(startName: string, endName: string): Promise<BusInfo[]> {
     console.log(`[BusPlanner] Planning: ${startName} -> ${endName}`);
 
-    // 0. Cache Check (??«î?)
+    // 0. Cache check
     const cacheKey = `${CONFIG.CACHE_KEY_PREFIX}${startName}|${endName}`;
     try {
         const cached = await AsyncStorage.getItem(cacheKey);
@@ -1236,15 +1229,14 @@ export class BusPlannerService {
         }
     } catch (e) { /* ignore */ }
 
-    // 1. Static Route Matching (Python logic Step 1)
+    // 1. Find candidate routes from local topology.
     const matchedRoutes = this.findStaticRoutes(startName, endName);
     if (matchedRoutes.length === 0) return [];
     
     console.log(`Found ${matchedRoutes.length} static candidates.`);
 
-    // 2. Prepare for Realtime Fetching
-    // ??‰ïŠ¾??????¬î¼¼î·é–°ï¼? SLID (?é§?)
-    const slidMap = new Map<string, string>(); // slid -> repSid (???SID)
+    // 2. Prepare realtime fetches by unique SLID.
+    const slidMap = new Map<string, string>(); // slid -> representative sid
     
     matchedRoutes.forEach(r => {
         const startSid = r.stops_sid[r.match_range[0]];
@@ -1258,18 +1250,18 @@ export class BusPlannerService {
 
     const tasks = Array.from(slidMap.entries()).map(([slid, sid]) => ({ slid, sid }));
 
-    // 3. Batch Fetch Realtime Data
+    // 3. Fetch realtime batches.
     const nestedResults = await this.batchProcess(
         tasks,
         (task) => this.fetchRealtimeBySlidCached(task.slid, task.sid)
     );
     const allRealtimeBuses = nestedResults.flat();
 
-    // ?±ç???¹æ??î¸‚î???‡â€? SLID -> Array of RealtimeData
+    // Re-index realtime buses as SLID -> realtime bus list.
     const realtimeLookup: Record<string, any[]> = {};
     allRealtimeBuses.forEach(b => {
-        // ?îº î¾­ realtime data ??? rid ??time?—ï—»?????¬î¼½î·????…ç?î¡??¸Â€?SLID
-        // ?î©–ã??”ï???trick?—î«±???«î¯­ fetchRealtimeBySlid ?†âˆª??ä¹? sid?—ï—º???sid -> slid
+        // fetchRealtimeBySlid stores the representative sid, so convert it back
+        // to the current SLID bucket before matching by rid.
         const info = this.getStopInfo(b.sid);
         if (info && info.slid) {
             if (!realtimeLookup[info.slid]) realtimeLookup[info.slid] = [];
@@ -1277,7 +1269,7 @@ export class BusPlannerService {
         }
     });
 
-    // 4. Construct Final Objects
+    // 4. Construct final route-plan results.
     const finalBuses: BusInfo[] = [];
 
     for (const route of matchedRoutes) {
@@ -1294,12 +1286,12 @@ export class BusPlannerService {
         const arrivalText = matchBus ? matchBus.time_text : '\u672a\u767c\u8eca';
         const rawTime = matchBus ? matchBus.raw_time : CONFIG.TIME_NOT_DEPARTED;
 
-        // Build Path
+        // Build the path segment between the selected start and end stops.
         const pathSids = route.stops_sid.slice(startIdx, endIdx + 1);
         const pathStops: StopInfo[] = pathSids.map(sid => {
             const info = this.getStopInfo(sid);
             return {
-                name: info?.name || "??°î?",
+                name: info?.name || 'Unknown',
                 sid: sid,
                 slid: info?.slid,
                 geo: info?.geo
@@ -1314,14 +1306,14 @@ export class BusPlannerService {
             rawTime: rawTime,
             directionText: route.direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b',
             stopCount: pathStops.length - 1,
-            estimatedDuration: Math.ceil((pathStops.length - 1) * 2 + 1), // ?¡å???—î«±??????+?ºæŠµ?1???
+            estimatedDuration: Math.ceil((pathStops.length - 1) * 2 + 1), // rough estimate
             startGeo: pathStops[0].geo,
             endGeo: pathStops[pathStops.length - 1].geo,
             pathStops: pathStops
         });
     }
 
-    // 5. Sort & Cache (use centralized comparator to ensure arriving items prioritized)
+    // 5. Sort & cache.
     finalBuses.sort((a, b) => compareArrivals(a, b));
     
     // Cache without dynamic time
@@ -1333,26 +1325,25 @@ export class BusPlannerService {
   public async getArrivalsBySlid(slid: string, stopName: string): Promise<any[]> {
     console.log(`[BusPlanner] Using direct SLID: ${slid}`);
 
-    const buses = await this.fetchRealtimeBySlidCached(slid, stopName); // ??slid
+    const buses = await this.fetchRealtimeBySlidCached(slid, stopName);
 
-    // ????îµ¤î¾¦?—ï????¸ï…»????›ïµî¨–å??»î??æ¸?????¿ï?????
+    // Sort with the shared arrival comparator so urgent arrivals stay first.
     return buses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async getStopArrivals(stopName: string): Promise<any[]> {
-    // 1. ?????î³???
+    // 1. Guard against an uninitialized service.
     if (!this.stopDb) {
       console.warn("Service not initialized, loading DB...");
-      // ?äº¤î???constructor ????‡äº¥???JSON?—ï—¾?î©–ã???¬è•­?ä¼??äº¤î??îµ??‡ä???????? init
+      // Constructor eagerly loads the JSON bundles, so this is mostly defensive.
     }
 
-    // 2. ?î¡??°è„©???????????SID
+    // 2. Resolve every SID for this stop name.
     const sids = this.getSidsByName(stopName);
     if (sids.length === 0) return [];
 
-    // 3. ??‰ïŠ¾?ï???´ï‹«? SLID (Stop Location ID) ?ä»¿î¼????´ï‹¬???
-    // ??´æ‘©?—î«°??Â€?????—î»?è³??­î«°?????(SID)?—ï—¹??°ïµ??«î»?è³¢ï…»?­æ€??Â€????????(SLID)
-    const slidMap = new Map<string, string>(); // slid -> representative_sid
+    // 3. Deduplicate by SLID so repeated stop positions only fetch once.
+    const slidMap = new Map<string, string>(); // slid -> representative sid
     
     for (const sid of sids) {
       const info = this.getStopInfo(sid);
@@ -1363,7 +1354,7 @@ export class BusPlannerService {
       }
     }
 
-    // 4. ?å¯æ´»?è¥¿???? (?¿è¼»??ï¼???batchProcess ?ˆî???
+    // 4. Fetch realtime data in batches.
     const tasks = Array.from(slidMap.entries()).map(([slid, sid]) => ({ slid, sid }));
     
     const nestedResults = await this.batchProcess(
@@ -1371,7 +1362,7 @@ export class BusPlannerService {
       (task) => this.fetchRealtimeBySlidCached(task.slid, task.sid)
     );
 
-    // 5. ??‡å??¯î???è???¨î»??¿è¼»??æ¢î??¥î?????
+    // 5. Flatten and sort the final realtime bus list.
     const allBuses = nestedResults.flat();
     return allBuses.sort((a, b) => compareArrivals(a, b));
   }
@@ -1412,3 +1403,4 @@ export class BusPlannerService {
     return result;
   }
 }
+
