@@ -181,9 +181,10 @@ class TimeParser {
     const seconds = parseInt(codeStr, 10);
     if (isNaN(seconds)) return BusStatus.UNKNOWN;
     if (seconds < 0) return BusStatus.NOT_DEPARTED;
-    if (seconds < 180) return '\u5c07\u5230\u7ad9';
+    if (seconds <= 30) return BusStatus.ARRIVING;
+    if (seconds < 60) return '\u5c07\u5230\u7ad9';
 
-    return `${Math.floor(seconds / 60)}\u5206`;
+    return `${Math.ceil(seconds / 60)}\u5206`;
   }
 }
 
@@ -456,7 +457,7 @@ export class BusPlannerService {
       return { etaText: BusStatus.ARRIVING, rawTime: 0 };
     }
     if (seconds < 60) {
-      return { etaText: '\u5373\u5c07\u5230\u7ad9', rawTime: seconds };
+      return { etaText: '\u5c07\u5230\u7ad9', rawTime: seconds };
     }
 
     return {
@@ -472,7 +473,7 @@ export class BusPlannerService {
     if (eta.etaText === BusStatus.TRAFFIC_CONTROL) return 3;
     if (eta.etaText === BusStatus.NOT_DEPARTED) return 4;
     if (eta.etaText === BusStatus.ARRIVING) return 6;
-    if (eta.etaText === '\u5373\u5c07\u5230\u7ad9') return 5;
+    if (eta.etaText === '\u5c07\u5230\u7ad9') return 5;
     return 5;
   }
 

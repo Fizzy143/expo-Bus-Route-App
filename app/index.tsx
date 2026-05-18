@@ -12,9 +12,11 @@ import {
   Platform,
   RefreshControl,
   ScrollView,
+  StyleProp,
   StyleSheet,
   Text,
   TextInput,
+  TextStyle,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -25,8 +27,8 @@ import { FavoriteRoute, favoriteRoutesService } from '../components/favoriteRout
 import InstallPWA from '../components/InstallPWA';
 import NotificationSettings from '../components/NotificationSettings';
 import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
-import WebRouteTransitionView from '../components/WebRouteTransitionView';
 import { beginWebRouteTransition } from '../components/web-route-transition';
+import WebRouteTransitionView from '../components/WebRouteTransitionView';
 import { compareArrivals } from '../utils/routeSorter';
 
 // 定義 UI 用的介面 (配合新 API 的回傳結構進行適配)
@@ -42,6 +44,7 @@ export default function StopScreen() {
   const router = useRouter();
   const { name } = useLocalSearchParams<{ name?: string }>();
   const pageTransitionRef = useRef<HTMLElement | null>(null);
+  const AUTO_REFRESH_MS = 10000;
 
   // 使用新版 Service
   const plannerRef = useRef(new BusPlannerService());
@@ -120,7 +123,7 @@ export default function StopScreen() {
     inputRange: [0, 1],
     outputRange: [0, 250],
   });
-  const openRouteDetails = (routeName?: string) => {
+  const openRouteDetails = (routeName?: string, direction?: string) => {
     const normalizedRouteName = routeName?.trim();
     if (!normalizedRouteName || normalizedRouteName === '載入中') {
       return;
@@ -129,7 +132,10 @@ export default function StopScreen() {
     beginWebRouteTransition(pageTransitionRef.current, '/bus-route', 'forward');
     router.push({
       pathname: '/bus-route' as any,
-      params: { routeName: normalizedRouteName },
+      params: {
+        routeName: normalizedRouteName,
+        preferredDirection: direction?.trim() || undefined,
+      },
     });
   };
 
@@ -259,7 +265,7 @@ export default function StopScreen() {
       // 保存最近站牌
       saveRecentStop(selectedStop);
       if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = setInterval(() => fetchBusData(selectedStop, true), 30000); // 自動更新傳 true
+      intervalRef.current = setInterval(() => fetchBusData(selectedStop, true), AUTO_REFRESH_MS); // 自動更新傳 true
     }
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -407,7 +413,7 @@ export default function StopScreen() {
           if (currentRoutes.length > 0) {
             loadAllFavoriteRoutesArrivals(currentRoutes, true); // 自動更新傳 true
           }
-        }, 30000);
+        }, AUTO_REFRESH_MS);
       } else {
         // 沒有常用路線，顯示預設站牌
         setDisplayMode('default');
@@ -825,21 +831,29 @@ export default function StopScreen() {
 
   // 狀態徽章
   const renderBadge = (text: string) => {
-    const t = (text || '').toString();
+    const t = (text || '').toString().trim();
     let style = styles.badgeGray;
+    let textStyle: StyleProp<TextStyle> = styles.badgeText;
+    const minuteMatch = t.match(/^(\d+)\s*分/);
+    const minuteValue = minuteMatch ? parseInt(minuteMatch[1], 10) : null;
+
     if (t.includes('將到') || t.includes('進站') || t === '0') style = styles.badgeRed;
-    else if (t.includes('分')) style = styles.badgeBlue;
+    else if (minuteValue !== null && minuteValue > 1 && minuteValue <= 3) {
+      style = styles.badgeSoftRed;
+      textStyle = styles.badgeSoftRedText;
+    }
+    else if (minuteValue !== null) style = styles.badgeBlue;
     else if (t.includes('未發') || t.includes('末班') || t.includes('未營運')) style = styles.badgeGray;
     
     return (
       <View style={[styles.badgeBase, style]}>
-        <Text style={styles.badgeText}>{t}</Text>
+        <Text style={textStyle}>{t}</Text>
       </View>
     );
   };
 
   const renderItem = ({ item }: { item: UIArrival }) => (
-    <TouchableOpacity onPress={() => openRouteDetails(item.routeName)}>
+    <TouchableOpacity onPress={() => openRouteDetails(item.routeName, item.direction)}>
       <View style={styles.row}>
         <View style={{ flex: 1 }}>
           <Text style={styles.route}>{item.route}</Text>
@@ -855,7 +869,7 @@ export default function StopScreen() {
   );
 
   const renderFavoriteRouteItem = ({ item }: { item: UIArrival }) => (
-    <TouchableOpacity onPress={() => openRouteDetails(item.routeName)}>
+    <TouchableOpacity onPress={() => openRouteDetails(item.routeName, item.direction)}>
       <View style={styles.row}>
         <View style={{ flex: 1 }}>
           <Text style={styles.route}>{item.route}</Text>
@@ -1471,6 +1485,8 @@ const styles = StyleSheet.create({
   },
   badgeText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   badgeRed: { backgroundColor: '#E74C3C' },
+  badgeSoftRed: { backgroundColor: '#dccaca' },
+  badgeSoftRedText: { color: '#D7343A', fontWeight: '800', fontSize: 16 },
   badgeBlue: { backgroundColor: '#6F73F8' },
   badgeGray: { backgroundColor: '#7f8686' },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },

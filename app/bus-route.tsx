@@ -43,7 +43,10 @@ const SOON_TEXT = '\u5c07\u5230\u7ad9';
 const GO_TEXT = '\u53bb\u7a0b';
 const BACKWARD_TEXT = '\u8fd4\u7a0b';
 const MINUTE_UNIT_TEXT = '\u5206';
+const SOFT_ALERT_MIN_SECONDS = 60;
+const SOFT_ALERT_MAX_SECONDS = 180;
 const STOP_ROW_HEIGHT = 66;
+const NEAREST_STOP_VIEW_POSITION = 0.38;
 const CENTER_RETRY_DELAY_MS = 120;
 const MAX_CENTER_RETRIES = 4;
 
@@ -53,6 +56,15 @@ function normalizeDirectionText(direction: number, text?: string): string {
   }
 
   return direction === 0 ? GO_TEXT : BACKWARD_TEXT;
+}
+
+function getDirectionDisplayText(direction: RouteDirectionDetails): string {
+  const lastStopName = direction.stops[direction.stops.length - 1]?.name?.trim();
+  if (lastStopName) {
+    return `往 ${lastStopName}`;
+  }
+
+  return normalizeDirectionText(direction.direction, direction.directionText);
 }
 
 function normalizeEtaText(text: string | undefined, rawTime: number): string {
@@ -119,14 +131,19 @@ function hasDirectionLoaded(direction: RouteDirectionDetails | undefined): boole
 
 export default function BusRouteDetailScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ routeName?: string | string[] }>();
+  const params = useLocalSearchParams<{
+    routeName?: string | string[];
+    preferredDirection?: string | string[];
+  }>();
   const pageTransitionRef = useRef<HTMLElement | null>(null);
   const plannerRef = useRef(new BusPlannerService());
   const pagerRef = useRef<PagerView>(null);
   const selectedDirectionRef = useRef(0);
   const directionListRefs = useRef<Record<number, FlatList<RouteStopArrival> | null>>({});
-  const pendingCenterDirectionsRef = useRef(new Set<number>());
+  const pendingCenterDirectionRef = useRef<number | null>(null);
+  const pendingPagerDirectionIndexRef = useRef<number | null>(null);
   const hasAutoCenteredInitialRef = useRef(false);
+  const hasAppliedPreferredDirectionRef = useRef(false);
 
   const routeName = useMemo(() => {
     if (Array.isArray(params.routeName)) {
@@ -134,6 +151,26 @@ export default function BusRouteDetailScreen() {
     }
     return params.routeName || DEFAULT_ROUTE_NAME;
   }, [params.routeName]);
+
+  const preferredDirection = useMemo(() => {
+    const rawDirection = Array.isArray(params.preferredDirection)
+      ? params.preferredDirection[0]
+      : params.preferredDirection;
+
+    if (!rawDirection) {
+      return null;
+    }
+
+    const normalized = rawDirection.trim();
+    if (normalized === GO_TEXT) {
+      return 0;
+    }
+    if (normalized === BACKWARD_TEXT) {
+      return 1;
+    }
+
+    return null;
+  }, [params.preferredDirection]);
 
   const [routeDetails, setRouteDetails] = useState<RouteDetails | null>(null);
   const [directionData, setDirectionData] = useState<RouteDirectionDetails[]>([]);
@@ -148,12 +185,34 @@ export default function BusRouteDetailScreen() {
     {}
   );
 
+  const syncPagerToIndex = useCallback((index: number) => {
+    const pager = pagerRef.current as
+      | (PagerView & {
+          setPageWithoutAnimation?: (page: number) => void;
+          setPage?: (page: number) => void;
+        })
+      | null;
+
+    if (!pager) {
+      return;
+    }
+
+    if (typeof pager.setPageWithoutAnimation === 'function') {
+      pager.setPageWithoutAnimation(index);
+      return;
+    }
+
+    if (typeof pager.setPage === 'function') {
+      pager.setPage(index);
+    }
+  }, []);
+
   const queueCenterDirection = useCallback((direction: number) => {
     if (Platform.OS !== 'web') {
       return;
     }
 
-    pendingCenterDirectionsRef.current.add(direction);
+    pendingCenterDirectionRef.current = direction;
   }, []);
 
   const centerNearestStop = useCallback(
@@ -179,12 +238,16 @@ export default function BusRouteDetailScreen() {
         list.scrollToIndex({
           animated: true,
           index: nearestIndex,
-          viewPosition: 0.5,
+          viewPosition: NEAREST_STOP_VIEW_POSITION,
         });
-        pendingCenterDirectionsRef.current.delete(direction);
+        if (pendingCenterDirectionRef.current === direction) {
+          pendingCenterDirectionRef.current = null;
+        }
       } catch {
         if (retryCount < MAX_CENTER_RETRIES) {
           setTimeout(() => centerNearestStop(direction, retryCount + 1), CENTER_RETRY_DELAY_MS);
+        } else if (pendingCenterDirectionRef.current === direction) {
+          pendingCenterDirectionRef.current = null;
         }
       }
     },
@@ -279,6 +342,21 @@ export default function BusRouteDetailScreen() {
         setDirectionData(prev => (prev.length > 0 ? prev : baseDetails.directions));
         setLoading(false);
 
+        const preferredIndex =
+          hasAppliedPreferredDirectionRef.current || preferredDirection === null
+            ? -1
+            : baseDetails.directions.findIndex(direction => direction.direction === preferredDirection);
+
+        if (preferredIndex >= 0 && preferredIndex !== selectedDirectionRef.current) {
+          selectedDirectionRef.current = preferredIndex;
+          setSelectedDirection(preferredIndex);
+          pendingPagerDirectionIndexRef.current = preferredIndex;
+          queueCenterDirection(baseDetails.directions[preferredIndex].direction);
+          hasAppliedPreferredDirectionRef.current = true;
+        } else if (!hasAppliedPreferredDirectionRef.current && preferredDirection !== null) {
+          hasAppliedPreferredDirectionRef.current = true;
+        }
+
         const activeIndex = Math.min(selectedDirectionRef.current, baseDetails.directions.length - 1);
         const activeDirection = baseDetails.directions[activeIndex] || baseDetails.directions[0];
         await loadSingleDirection(activeDirection, isRefresh);
@@ -290,7 +368,7 @@ export default function BusRouteDetailScreen() {
         setRefreshing(false);
       }
     },
-    [loadSingleDirection, routeName]
+    [loadSingleDirection, preferredDirection, queueCenterDirection, routeName]
   );
 
   const ensureDirectionLoaded = useCallback(
@@ -318,8 +396,10 @@ export default function BusRouteDetailScreen() {
     setLocationReady(false);
     setNearestStopIndexByDirection({});
     directionListRefs.current = {};
-    pendingCenterDirectionsRef.current.clear();
+    pendingCenterDirectionRef.current = null;
+    pendingPagerDirectionIndexRef.current = null;
     hasAutoCenteredInitialRef.current = false;
+    hasAppliedPreferredDirectionRef.current = false;
     loadRouteDetails();
 
     const interval = setInterval(() => {
@@ -414,7 +494,7 @@ export default function BusRouteDetailScreen() {
       hasAutoCenteredInitialRef.current = true;
     }
 
-    if (pendingCenterDirectionsRef.current.has(selectedDirection)) {
+    if (pendingCenterDirectionRef.current === selectedDirection) {
       centerNearestStop(selectedDirection);
     }
   }, [
@@ -424,6 +504,22 @@ export default function BusRouteDetailScreen() {
     queueCenterDirection,
     selectedDirection,
   ]);
+
+  useEffect(() => {
+    const pendingIndex = pendingPagerDirectionIndexRef.current;
+    if (pendingIndex === null) {
+      return;
+    }
+
+    if (!directionData[pendingIndex]) {
+      return;
+    }
+
+    syncPagerToIndex(pendingIndex);
+    queueCenterDirection(directionData[pendingIndex].direction);
+    void ensureDirectionLoaded(pendingIndex);
+    pendingPagerDirectionIndexRef.current = null;
+  }, [directionData, ensureDirectionLoaded, queueCenterDirection, syncPagerToIndex]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -436,6 +532,16 @@ export default function BusRouteDetailScreen() {
     void ensureDirectionLoaded(index);
   };
 
+  const handleDirectionTabPress = (index: number) => {
+    if (index === selectedDirection) {
+      queueCenterDirection(index);
+      centerNearestStop(index);
+      return;
+    }
+
+    pagerRef.current?.setPage(index);
+  };
+
   const renderBadge = (stop: RouteStopArrival) => {
     const text = normalizeEtaText(stop.etaText, stop.rawTime);
     let badgeStyle = styles.badgeGray;
@@ -443,7 +549,11 @@ export default function BusRouteDetailScreen() {
 
     if (stop.rawTime <= 0 || text.includes(COMING_TEXT) || text.includes(SOON_TEXT)) {
       badgeStyle = styles.badgeRed;
-    } else if (stop.rawTime > 0 && stop.rawTime <= 180) {
+    } else if (
+      stop.rawTime > SOFT_ALERT_MIN_SECONDS &&
+      stop.rawTime <= SOFT_ALERT_MAX_SECONDS &&
+      /\d/.test(text)
+    ) {
       badgeStyle = styles.badgeSoftRed;
       isSoftRedMinutes = /^\d+\s*\D*$/.test(text);
     } else if (text === LOADING_TEXT) {
@@ -539,10 +649,7 @@ export default function BusRouteDetailScreen() {
             <TouchableOpacity
               key={`${direction.rid}-${direction.direction}`}
               style={[styles.tabButton, selectedDirection === index && styles.tabButtonActive]}
-              onPress={() => {
-                handleDirectionChange(index);
-                pagerRef.current?.setPage(index);
-              }}
+              onPress={() => handleDirectionTabPress(index)}
             >
               <Text
                 style={[
@@ -550,7 +657,7 @@ export default function BusRouteDetailScreen() {
                   selectedDirection === index && styles.tabButtonTextActive,
                 ]}
               >
-                {normalizeDirectionText(direction.direction, direction.directionText)}
+                {getDirectionDisplayText(direction)}
               </Text>
             </TouchableOpacity>
           ))}
@@ -580,7 +687,7 @@ export default function BusRouteDetailScreen() {
                 <View key={`${direction.rid}-${direction.direction}`} style={styles.page}>
                   <View style={styles.directionHeader}>
                     <Text style={styles.directionTitle}>
-                      {routeName} {normalizeDirectionText(direction.direction, direction.directionText)}
+                      {routeName} {getDirectionDisplayText(direction)}
                     </Text>
                     <Text style={styles.directionMeta}>{`${direction.stops.length}${STOPS_SUFFIX}`}</Text>
                   </View>
@@ -826,15 +933,15 @@ const styles = StyleSheet.create({
   badgeSoftRedText: {
     color: '#D7343A',
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   badgeSoftRedNumber: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   badgeSoftRedUnit: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
   },
   badgeBlue: {
     backgroundColor: '#6F73F8',

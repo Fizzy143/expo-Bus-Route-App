@@ -26,6 +26,7 @@ export default function StopDetailScreen() {
   const router = useRouter();
   const { name } = useLocalSearchParams<{ name?: string }>();
   const stopName = name || '捷運公館站';
+  const AUTO_REFRESH_MS = 10000;
 
   const [arrivals, setArrivals] = useState<UIArrival[]>([]);
   const [lastUpdate, setLastUpdate] = useState<string>('');
@@ -273,7 +274,7 @@ export default function StopDetailScreen() {
       fetchBusData(false); // 初始載入
       intervalRef.current = setInterval(() => {
         fetchBusData(true);
-      }, 30000); // 自動更新傳 true
+      }, AUTO_REFRESH_MS); // 自動更新傳 true
     }
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);

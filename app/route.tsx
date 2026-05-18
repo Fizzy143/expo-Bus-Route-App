@@ -16,6 +16,11 @@ import {
 import type { BusInfo } from '../components/busPlanner';
 import { BusPlannerService } from '../components/busPlanner';
 import { favoriteRoutesService } from '../components/favoriteRoutes';
+import {
+  formatDistance,
+  getNearbyStopsWithLocation,
+  type StopEntry,
+} from '../components/locationService';
 import WebRouteTransitionView from '../components/WebRouteTransitionView';
 import { beginWebRouteTransition } from '../components/web-route-transition';
 import stopMapRaw from '../databases/stop_id_map.json';
@@ -43,6 +48,8 @@ export default function RouteScreen() {
   const [searchMode, setSearchMode] = useState<'from' | 'to' | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
+  const [nearbyStops, setNearbyStops] = useState<StopEntry[]>([]);
+  const [loadingNearbyStops, setLoadingNearbyStops] = useState(false);
   
   // 路線結果狀態
   const [routeInfo, setRouteInfo] = useState<BusInfo[]>([]);
@@ -124,6 +131,32 @@ export default function RouteScreen() {
       );
     }, 250);
   }, [searchQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadNearbyStops = async () => {
+      try {
+        setLoadingNearbyStops(true);
+        const result = await getNearbyStopsWithLocation(800, 10);
+        if (!cancelled && result.success) {
+          setNearbyStops(result.stops);
+        }
+      } catch (error) {
+        console.error('載入附近站牌失敗:', error);
+      } finally {
+        if (!cancelled) {
+          setLoadingNearbyStops(false);
+        }
+      }
+    };
+
+    void loadNearbyStops();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 在 PWA (standalone) 模式下，autoFocus 可能不會觸發鍵盤，提供 fallback focus
   useEffect(() => {
@@ -412,27 +445,55 @@ export default function RouteScreen() {
           />
         </View>
 
-        <FlatList
-          data={searchSuggestions}
-          keyExtractor={(item) => item}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="on-drag"
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.searchSuggestionItem}
-              onPress={() => selectStop(item)}
-            >
-              <Text style={styles.searchSuggestionText}>{item}</Text>
-            </TouchableOpacity>
-          )}
-          ListEmptyComponent={
-            searchQuery.trim() ? (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>沒有找到站牌</Text>
-              </View>
-            ) : null
-          }
-        />
+        {loadingNearbyStops ? (
+          <View style={styles.loadingNearbyContainer}>
+            <ActivityIndicator size="small" color="#6F73F8" />
+            <Text style={styles.loadingNearbyText}>正在取得附近站牌...</Text>
+          </View>
+        ) : searchQuery.trim() === '' && nearbyStops.length > 0 ? (
+          <View style={styles.nearbySection}>
+            <Text style={styles.nearbySectionTitle}>附近站牌</Text>
+            <FlatList
+              data={nearbyStops}
+              keyExtractor={(item) => item.name}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.searchSuggestionItem}
+                  onPress={() => selectStop(item.name)}
+                >
+                  <View style={styles.nearbySuggestionRow}>
+                    <Text style={styles.searchSuggestionText}>{item.name}</Text>
+                    <Text style={styles.nearbyDistanceText}>{formatDistance(item.distance)}</Text>
+                  </View>
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        ) : (
+          <FlatList
+            data={searchSuggestions}
+            keyExtractor={(item) => item}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.searchSuggestionItem}
+                onPress={() => selectStop(item)}
+              >
+                <Text style={styles.searchSuggestionText}>{item}</Text>
+              </TouchableOpacity>
+            )}
+            ListEmptyComponent={
+              searchQuery.trim() ? (
+                <View style={styles.emptyContainer}>
+                  <Text style={styles.emptyText}>沒有找到站牌</Text>
+                </View>
+              ) : null
+            }
+          />
+        )}
       </View>
     </Modal>
   );
@@ -1024,5 +1085,38 @@ const styles = StyleSheet.create({
   searchSuggestionText: {
     fontSize: 16,
     color: '#333',
+  },
+  nearbySection: {
+    flex: 1,
+  },
+  nearbySectionTitle: {
+    fontSize: 14,
+    color: '#888',
+    fontWeight: '600',
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+    paddingTop: 4,
+  },
+  nearbySuggestionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+  },
+  nearbyDistanceText: {
+    color: '#6F73F8',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  loadingNearbyContainer: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  loadingNearbyText: {
+    color: '#666',
+    fontSize: 14,
   },
 });
