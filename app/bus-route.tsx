@@ -37,12 +37,12 @@ const LOAD_FAILED_TEXT = '\u8f09\u5165\u8def\u7dda\u8cc7\u8a0a\u5931\u6557';
 const NOT_FOUND_PREFIX = '\u627e\u4e0d\u5230 ';
 const NOT_FOUND_SUFFIX = ' \u8def\u7dda\u8cc7\u6599';
 const LAST_UPDATED_TEXT = '\u4e0a\u6b21\u66f4\u65b0\uff1a';
-const STOPS_SUFFIX = ' \u7ad9';
 const COMING_TEXT = '\u9032\u7ad9\u4e2d';
 const SOON_TEXT = '\u5c07\u5230\u7ad9';
 const GO_TEXT = '\u53bb\u7a0b';
 const BACKWARD_TEXT = '\u8fd4\u7a0b';
 const MINUTE_UNIT_TEXT = '\u5206';
+const JUST_UPDATED_TEXT = '\u525b\u525b\u66f4\u65b0';
 const SOFT_ALERT_MIN_SECONDS = 60;
 const SOFT_ALERT_MAX_SECONDS = 180;
 const STOP_ROW_HEIGHT = 66;
@@ -65,6 +65,19 @@ function getDirectionDisplayText(direction: RouteDirectionDetails): string {
   }
 
   return normalizeDirectionText(direction.direction, direction.directionText);
+}
+
+function formatRelativeUpdateText(lastUpdateAt: number | null, now: number): string {
+  if (!lastUpdateAt) {
+    return '--';
+  }
+
+  const diffSeconds = Math.max(0, Math.floor((now - lastUpdateAt) / 1000));
+  if (diffSeconds <= 0) {
+    return JUST_UPDATED_TEXT;
+  }
+
+  return `${diffSeconds} 秒前更新`;
 }
 
 function normalizeEtaText(text: string | undefined, rawTime: number): string {
@@ -178,7 +191,8 @@ export default function BusRouteDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [errorText, setErrorText] = useState('');
-  const [lastUpdate, setLastUpdate] = useState('');
+  const [lastUpdateAt, setLastUpdateAt] = useState<number | null>(null);
+  const [relativeNow, setRelativeNow] = useState(() => Date.now());
   const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
   const [locationReady, setLocationReady] = useState(false);
   const [nearestStopIndexByDirection, setNearestStopIndexByDirection] = useState<Record<number, number>>(
@@ -316,7 +330,7 @@ export default function BusRouteDetailScreen() {
 
       if (realtimeDirection) {
         applyRealtimeDirection(realtimeDirection, preservePrevious);
-        setLastUpdate(new Date().toLocaleTimeString());
+        setLastUpdateAt(Date.now());
       }
     },
     [routeName]
@@ -388,6 +402,14 @@ export default function BusRouteDetailScreen() {
   );
 
   useEffect(() => {
+    const interval = setInterval(() => {
+      setRelativeNow(Date.now());
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
     selectedDirectionRef.current = 0;
     setSelectedDirection(0);
     setRouteDetails(null);
@@ -400,6 +422,7 @@ export default function BusRouteDetailScreen() {
     pendingPagerDirectionIndexRef.current = null;
     hasAutoCenteredInitialRef.current = false;
     hasAppliedPreferredDirectionRef.current = false;
+    setLastUpdateAt(null);
     loadRouteDetails();
 
     const interval = setInterval(() => {
@@ -625,6 +648,7 @@ export default function BusRouteDetailScreen() {
   };
 
   const tabDirections = directionData.length > 0 ? directionData : routeDetails?.directions || [];
+  const relativeUpdateText = formatRelativeUpdateText(lastUpdateAt, relativeNow);
 
   return (
     <WebRouteTransitionView backgroundColor="#152021" containerRef={pageTransitionRef}>
@@ -689,7 +713,7 @@ export default function BusRouteDetailScreen() {
                     <Text style={styles.directionTitle}>
                       {routeName} {getDirectionDisplayText(direction)}
                     </Text>
-                    <Text style={styles.directionMeta}>{`${direction.stops.length}${STOPS_SUFFIX}`}</Text>
+                    <Text style={styles.directionMeta}>{relativeUpdateText}</Text>
                   </View>
 
                   <FlatList
@@ -726,9 +750,9 @@ export default function BusRouteDetailScreen() {
           </View>
         )}
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>{`${LAST_UPDATED_TEXT}${lastUpdate || '--:--:--'}`}</Text>
-        </View>
+      <View style={styles.footer}>
+        <Text style={styles.footerText}>{`${LAST_UPDATED_TEXT}${relativeUpdateText}`}</Text>
+      </View>
       </View>
     </WebRouteTransitionView>
   );

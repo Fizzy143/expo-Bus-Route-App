@@ -452,7 +452,6 @@ export default function RouteScreen() {
           </View>
         ) : searchQuery.trim() === '' && nearbyStops.length > 0 ? (
           <View style={styles.nearbySection}>
-            <Text style={styles.nearbySectionTitle}>附近站牌</Text>
             <FlatList
               data={nearbyStops}
               keyExtractor={(item) => item.name}
@@ -1088,14 +1087,6 @@ const styles = StyleSheet.create({
   },
   nearbySection: {
     flex: 1,
-  },
-  nearbySectionTitle: {
-    fontSize: 14,
-    color: '#888',
-    fontWeight: '600',
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-    paddingTop: 4,
   },
   nearbySuggestionRow: {
     flexDirection: 'row',
