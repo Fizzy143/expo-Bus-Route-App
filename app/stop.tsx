@@ -15,8 +15,10 @@ import { BusPlannerService } from '../components/busPlanner';
 import { compareArrivals } from '../utils/routeSorter';
 
 interface UIArrival {
+  rid?: string;
   route: string;
   direction?: string;
+  preferredDirection?: string;
   estimatedTime: string;
   key: string;
   rawTime?: number; // 原始到站秒數，用於排序
@@ -103,13 +105,22 @@ export default function StopDetailScreen() {
           const TIME_UNKNOWN = 88888;
 
           // 建立 rid+route 到舊資料的映射（包含 direction, rawTime, estimatedTime）
-          const existingDataMap = new Map<string, { direction?: string; rawTime?: number; estimatedTime?: string }>();
+          const existingDataMap = new Map<
+            string,
+            {
+              direction?: string;
+              preferredDirection?: string;
+              rawTime?: number;
+              estimatedTime?: string;
+            }
+          >();
           prev.forEach(item => {
             const parts = item.key.split('-');
             if (parts.length >= 2) {
               const lookupKey = `${parts[0]}-${parts[1]}`; // rid-route
               existingDataMap.set(lookupKey, {
                 direction: item.direction,
+                preferredDirection: item.preferredDirection,
                 rawTime: typeof item.rawTime === 'number' ? item.rawTime : undefined,
                 estimatedTime: item.estimatedTime
               });
@@ -133,8 +144,10 @@ export default function StopDetailScreen() {
             if (saved && typeof saved.rawTime === 'number' && saved.rawTime < TIME_NOT_DEPARTED && (newIsTerminal || newIsUnknown)) {
               // 保留舊的有效時間與文字
               return {
+                rid: bus.rid,
                 route: bus.route,
                 direction: saved.direction || bus.direction || '',
+                preferredDirection: saved.preferredDirection || bus.direction || '',
                 estimatedTime: saved.estimatedTime || (newText || '更新中'),
                 key: `${bus.rid}-${bus.route}-${saved.rawTime}-${index}`,
                 rawTime: saved.rawTime,
@@ -143,8 +156,10 @@ export default function StopDetailScreen() {
 
             // 否則使用新的資料（包含 direction）
             return {
+              rid: bus.rid,
               route: bus.route,
               direction: saved?.direction || bus.direction || '',
+              preferredDirection: saved?.preferredDirection || bus.direction || '',
               estimatedTime: newText || '更新中',
               key: `${bus.rid}-${bus.route}-${newRaw}-${index}`,
               rawTime: newRaw,
@@ -157,7 +172,9 @@ export default function StopDetailScreen() {
           // 初始載入模式：先顯示路線名稱和時間，方向欄位暫時為空
           // 注意：新版 BusPlanner 使用 time_text (下劃線格式) 和 direction 欄位
           const initialData = uniqueBuses.map((bus, index) => ({
+            rid: bus.rid,
             route: bus.route,
+            preferredDirection: bus.direction || '',
             direction: bus.direction || '', // 新版已包含方向資訊
             estimatedTime: bus.time_text || bus.timeText || '更新中', // 相容新舊格式
             key: `${bus.rid}-${bus.route}-${bus.direction || ''}-${bus.rawTime}-${index}`, // 加入 index 確保唯一
@@ -303,6 +320,22 @@ export default function StopDetailScreen() {
     fetchBusData(false); // 手動刷新重新載入所有資料
   };
 
+  const openRouteDetails = (item: UIArrival) => {
+    const routeName = item.route?.trim();
+    if (!routeName) {
+      return;
+    }
+
+    router.push({
+      pathname: '/bus-route' as any,
+      params: {
+        routeName,
+        preferredRid: item.rid?.trim() || undefined,
+        preferredDirection: item.preferredDirection?.trim() || undefined,
+      },
+    });
+  };
+
   const renderBusItem = ({ item }: { item: UIArrival }) => {
     const timeText = item.estimatedTime || '未發車';
     let badgeColor = '#7f8686';
@@ -310,7 +343,7 @@ export default function StopDetailScreen() {
     else if (timeText.includes('分')) badgeColor = '#6F73F8';
 
     return (
-      <View style={styles.row}>
+      <TouchableOpacity style={styles.row} onPress={() => openRouteDetails(item)} activeOpacity={0.72}>
         <View style={styles.routeInfo}>
           <Text style={styles.route}>{item.route}</Text>
           {item.direction && (
@@ -320,7 +353,7 @@ export default function StopDetailScreen() {
         <View style={[styles.badge, { backgroundColor: badgeColor }]}>
           <Text style={styles.badgeText}>{timeText}</Text>
         </View>
-      </View>
+      </TouchableOpacity>
     );
   };
 

@@ -146,6 +146,7 @@ export default function BusRouteDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{
     routeName?: string | string[];
+    preferredRid?: string | string[];
     preferredDirection?: string | string[];
   }>();
   const pageTransitionRef = useRef<HTMLElement | null>(null);
@@ -184,6 +185,11 @@ export default function BusRouteDetailScreen() {
 
     return null;
   }, [params.preferredDirection]);
+
+  const preferredRid = useMemo(() => {
+    const rawRid = Array.isArray(params.preferredRid) ? params.preferredRid[0] : params.preferredRid;
+    return rawRid?.trim() || null;
+  }, [params.preferredRid]);
 
   const [routeDetails, setRouteDetails] = useState<RouteDetails | null>(null);
   const [directionData, setDirectionData] = useState<RouteDirectionDetails[]>([]);
@@ -356,10 +362,26 @@ export default function BusRouteDetailScreen() {
         setDirectionData(prev => (prev.length > 0 ? prev : baseDetails.directions));
         setLoading(false);
 
-        const preferredIndex =
-          hasAppliedPreferredDirectionRef.current || preferredDirection === null
-            ? -1
-            : baseDetails.directions.findIndex(direction => direction.direction === preferredDirection);
+        const preferredIndex = hasAppliedPreferredDirectionRef.current
+          ? -1
+          : (() => {
+              if (preferredRid) {
+                const ridMatchIndex = baseDetails.directions.findIndex(
+                  direction => direction.rid === preferredRid
+                );
+                if (ridMatchIndex >= 0) {
+                  return ridMatchIndex;
+                }
+              }
+
+              if (preferredDirection === null) {
+                return -1;
+              }
+
+              return baseDetails.directions.findIndex(
+                direction => direction.direction === preferredDirection
+              );
+            })();
 
         if (preferredIndex >= 0 && preferredIndex !== selectedDirectionRef.current) {
           selectedDirectionRef.current = preferredIndex;
@@ -367,7 +389,10 @@ export default function BusRouteDetailScreen() {
           pendingPagerDirectionIndexRef.current = preferredIndex;
           queueCenterDirection(baseDetails.directions[preferredIndex].direction);
           hasAppliedPreferredDirectionRef.current = true;
-        } else if (!hasAppliedPreferredDirectionRef.current && preferredDirection !== null) {
+        } else if (
+          !hasAppliedPreferredDirectionRef.current &&
+          (preferredRid !== null || preferredDirection !== null)
+        ) {
           hasAppliedPreferredDirectionRef.current = true;
         }
 
@@ -382,7 +407,7 @@ export default function BusRouteDetailScreen() {
         setRefreshing(false);
       }
     },
-    [loadSingleDirection, preferredDirection, queueCenterDirection, routeName]
+    [loadSingleDirection, preferredDirection, preferredRid, queueCenterDirection, routeName]
   );
 
   const ensureDirectionLoaded = useCallback(
