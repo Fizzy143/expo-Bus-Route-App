@@ -1,5 +1,5 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -30,6 +30,7 @@ interface StopMap {
 }
 
 const stopData = stopMapRaw as StopMap;
+const getPlanPairKey = (startStop: string, endStop: string) => `${startStop}\u0000${endStop}`;
 
 export default function RouteScreen() {
   const router = useRouter();
@@ -62,6 +63,10 @@ export default function RouteScreen() {
   const [isUpdating, setIsUpdating] = useState<boolean>(false);
   const [lastUpdateTime, setLastUpdateTime] = useState<number>(0);
   const updateIntervalRef = useRef<any>(null);
+  const autoPlanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activePlanRequestRef = useRef(0);
+  const planningPairRef = useRef<string | null>(null);
+  const lastAutoPlannedPairRef = useRef<string | null>(null);
   
   // 更新冷卻時間（毫秒）
   const UPDATE_COOLDOWN = 3000; // 3 秒
@@ -71,6 +76,56 @@ export default function RouteScreen() {
   
   const debounceRef = useRef<any>(null);
   const allStops = Object.keys(stopData.by_name);
+
+  const runRoutePlan = useCallback(async (startStop: string, endStop: string) => {
+    if (!startStop || !endStop) {
+      return;
+    }
+
+    const pairKey = getPlanPairKey(startStop, endStop);
+    if (planningPairRef.current === pairKey) {
+      return;
+    }
+
+    const requestId = activePlanRequestRef.current + 1;
+    activePlanRequestRef.current = requestId;
+    planningPairRef.current = pairKey;
+
+    setIsPlanning(true);
+    setLoading(true);
+    setHasSearched(true);
+
+    try {
+      console.log('規劃路線:', startStop, '→', endStop);
+      const routes = await plannerRef.current.plan(startStop, endStop);
+      console.log('找到路線數量:', routes.length);
+
+      if (activePlanRequestRef.current !== requestId) {
+        return;
+      }
+
+      setRouteInfo(routes);
+      setSelectedRouteIndex(0);
+
+      if (routes.length === 0) {
+        console.log('找不到可用路線');
+      }
+    } catch (error) {
+      if (activePlanRequestRef.current === requestId) {
+        console.error('路線規劃失敗:', error);
+        setRouteInfo([]);
+      }
+    } finally {
+      if (activePlanRequestRef.current === requestId) {
+        setLoading(false);
+        setIsPlanning(false);
+      }
+
+      if (planningPairRef.current === pairKey) {
+        planningPairRef.current = null;
+      }
+    }
+  }, []);
 
   // 初始化 BusPlannerService 並處理 URL 參數
   useEffect(() => {
@@ -88,6 +143,7 @@ export default function RouteScreen() {
           setFromStopDisplay(fromStr);
           setToStop(toStr);
           setToStopDisplay(toStr);
+          lastAutoPlannedPairRef.current = getPlanPairKey(fromStr, toStr);
           
           // 延遲一下確保狀態更新完成
           setTimeout(async () => {
@@ -208,6 +264,38 @@ export default function RouteScreen() {
   };
 
   // 更新路線動態資訊
+  useEffect(() => {
+    if (!fromStop || !toStop) {
+      if (autoPlanTimeoutRef.current) {
+        clearTimeout(autoPlanTimeoutRef.current);
+        autoPlanTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    const pairKey = getPlanPairKey(fromStop, toStop);
+    if (lastAutoPlannedPairRef.current === pairKey || planningPairRef.current === pairKey) {
+      return;
+    }
+
+    if (autoPlanTimeoutRef.current) {
+      clearTimeout(autoPlanTimeoutRef.current);
+    }
+
+    autoPlanTimeoutRef.current = setTimeout(() => {
+      lastAutoPlannedPairRef.current = pairKey;
+      void runRoutePlan(fromStop, toStop);
+      autoPlanTimeoutRef.current = null;
+    }, 250);
+
+    return () => {
+      if (autoPlanTimeoutRef.current) {
+        clearTimeout(autoPlanTimeoutRef.current);
+        autoPlanTimeoutRef.current = null;
+      }
+    };
+  }, [fromStop, toStop, runRoutePlan]);
+
   const updateRouteInfo = async () => {
     if (!fromStop || !toStop || routeInfo.length === 0) return;
     
@@ -304,6 +392,10 @@ export default function RouteScreen() {
     const willSwap = toStop && tempStop;
     const newFromStop = toStop;
     const newToStop = tempStop;
+
+    if (willSwap) {
+      lastAutoPlannedPairRef.current = getPlanPairKey(newFromStop, newToStop);
+    }
     
     setFromStop(newFromStop);
     setFromStopDisplay(toStopDisplay);
@@ -340,6 +432,14 @@ export default function RouteScreen() {
 
   // 清除搜尋結果
   const clearSearch = () => {
+    if (autoPlanTimeoutRef.current) {
+      clearTimeout(autoPlanTimeoutRef.current);
+      autoPlanTimeoutRef.current = null;
+    }
+
+    activePlanRequestRef.current += 1;
+    planningPairRef.current = null;
+    lastAutoPlannedPairRef.current = null;
     setFromStop('');
     setToStop('');
     setFromStopDisplay('');

@@ -114,8 +114,11 @@ const CONFIG = {
   TAIPEI_ESTIMATE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetEstimateTime.gz',
   TAIPEI_ROUTE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz',
   TAIPEI_STOP_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetStop.gz',
+  NEW_TAIPEI_ESTIMATE_URL: 'https://data.ntpc.gov.tw/api/datasets/07f7ccb3-ed00-43c4-966d-08e9dab24e95/json',
   USER_AGENT: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
   TIMEOUT_MS: 15000,
+  ROUTE_DETAIL_FALLBACK_TIMEOUT_MS: 7000,
+  DIRECT_ESTIMATE_MIN_MATCH_RATIO: 0.15,
   MAX_CONCURRENT_REQUESTS: 10,
   CACHE_KEY_PREFIX: "BUS_ROUTE_CACHE_V2_",
   TAIPEI_ROUTE_STOP_MAPPING_CACHE_PREFIX: 'TAIPEI_ROUTE_STOP_MAPPING_V3_',
@@ -201,12 +204,17 @@ export class BusPlannerService {
   private routeDb: any[]; // metro_bus_routes.json
   private realtimeCache = new Map<string, { expiresAt: number; data: any[] }>();
   private realtimeInFlight = new Map<string, Promise<any[]>>();
+  private routeDynaCache = new Map<string, { expiresAt: number; data: any }>();
+  private routeDynaInFlight = new Map<string, Promise<any>>();
   private taipeiEstimateCache: { expiresAt: number; data: TaipeiEstimateRow[] } | null = null;
   private taipeiEstimateInFlight: Promise<TaipeiEstimateRow[]> | null = null;
   private taipeiRouteCache: { expiresAt: number; data: TaipeiRouteRow[] } | null = null;
   private taipeiRouteInFlight: Promise<TaipeiRouteRow[]> | null = null;
   private taipeiStopCache: { expiresAt: number; data: TaipeiStopRow[] } | null = null;
   private taipeiStopInFlight: Promise<TaipeiStopRow[]> | null = null;
+  private newTaipeiEstimateCache = new Map<string, { expiresAt: number; data: TaipeiEstimateRow[] }>();
+  private newTaipeiEstimateInFlight = new Map<string, Promise<TaipeiEstimateRow[]>>();
+  private taipeiRouteStopMappingWarmups = new Set<string>();
 
   constructor() {
     // Route and stop datasets are imported at build time.
@@ -306,6 +314,52 @@ export class BusPlannerService {
     return `${CONFIG.TAIPEI_ROUTE_STOP_MAPPING_CACHE_PREFIX}${routeName}:${direction}`;
   }
 
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    fallback: T,
+    timeoutMessage: string
+  ): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<T>(resolve => {
+      timeoutId = setTimeout(() => {
+        console.warn(timeoutMessage);
+        resolve(fallback);
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  private async fetchWithTimeout(url: string, timeoutMs: number = CONFIG.TIMEOUT_MS): Promise<Response> {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const timeout = new Promise<Response>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller?.abort();
+        reject(new Error(`Request timed out after ${timeoutMs}ms: ${url}`));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([
+        fetch(url, controller ? { signal: controller.signal } : undefined),
+        timeout,
+      ]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
   private async fetchTaipeiEstimateDataset(): Promise<TaipeiEstimateRow[]> {
     if (!this.isWebEstimateSourceAvailable()) {
       return [];
@@ -320,7 +374,7 @@ export class BusPlannerService {
       return this.taipeiEstimateInFlight;
     }
 
-    const request = fetch(CONFIG.TAIPEI_ESTIMATE_URL)
+    const request = this.fetchWithTimeout(CONFIG.TAIPEI_ESTIMATE_URL)
       .then(async response => {
         if (!response.ok) {
           throw new Error(`Taipei ETA request failed: ${response.status}`);
@@ -345,7 +399,7 @@ export class BusPlannerService {
   private async fetchTaipeiJsonDataset<T extends Record<string, unknown>>(
     url: string
   ): Promise<T[]> {
-    const response = await fetch(url);
+    const response = await this.fetchWithTimeout(url);
     if (!response.ok) {
       throw new Error(`Taipei dataset request failed: ${response.status}`);
     }
@@ -425,6 +479,91 @@ export class BusPlannerService {
       });
 
     this.taipeiStopInFlight = request;
+    return request;
+  }
+
+  private async fetchNewTaipeiEstimateDataset(routeId: string | number): Promise<TaipeiEstimateRow[]> {
+    if (typeof window !== 'undefined') {
+      return [];
+    }
+
+    const cacheKey = String(routeId);
+    const now = Date.now();
+    const cached = this.newTaipeiEstimateCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+
+    const existingRequest = this.newTaipeiEstimateInFlight.get(cacheKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const url = `${CONFIG.NEW_TAIPEI_ESTIMATE_URL}?routeid=${encodeURIComponent(cacheKey)}`;
+    const request = this.fetchWithTimeout(url)
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error(`New Taipei ETA request failed: ${response.status}`);
+        }
+
+        const parsed = await response.json();
+        const data = Array.isArray(parsed) ? (parsed as TaipeiEstimateRow[]) : [];
+        this.newTaipeiEstimateCache.set(cacheKey, {
+          expiresAt: Date.now() + CONFIG.REALTIME_CACHE_TTL_MS,
+          data,
+        });
+        return data;
+      })
+      .catch(error => {
+        console.warn('[BusPlanner] New Taipei ETA source unavailable.', error);
+        return [];
+      })
+      .finally(() => {
+        this.newTaipeiEstimateInFlight.delete(cacheKey);
+      });
+
+    this.newTaipeiEstimateInFlight.set(cacheKey, request);
+    return request;
+  }
+
+  private async fetchRouteDynaByRouteIdCached(routeId: string | number): Promise<any | null> {
+    const cacheKey = String(routeId);
+    const now = Date.now();
+    const cached = this.routeDynaCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+
+    const existingRequest = this.routeDynaInFlight.get(cacheKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const url = `${CONFIG.BASE_URL}/RouteDyna?routeid=${encodeURIComponent(cacheKey)}`;
+    const request = this.fetchWithTimeout(url)
+      .then(async response => {
+        if (!response.ok) {
+          throw new Error(`RouteDyna request failed: ${response.status}`);
+        }
+
+        const data = await response.json();
+        this.routeDynaCache.set(cacheKey, {
+          expiresAt: Date.now() + CONFIG.REALTIME_CACHE_TTL_MS,
+          data,
+        });
+        return data;
+      })
+      .catch(error => {
+        console.warn('[BusPlanner] RouteDyna source unavailable.', error);
+        return null;
+      })
+      .finally(() => {
+        this.routeDynaInFlight.delete(cacheKey);
+      });
+
+    this.routeDynaInFlight.set(cacheKey, request);
     return request;
   }
 
@@ -533,7 +672,7 @@ export class BusPlannerService {
   }
 
   private scoreStopSequenceMatch(
-    localStops: Array<{ sid: string; name: string }>,
+    localStops: { sid: string; name: string }[],
     officialStops: TaipeiStopRow[]
   ): { score: number; stopIdByLocalSid: Map<string, string> } {
     const stopIdByLocalSid = new Map<string, string>();
@@ -595,20 +734,9 @@ export class BusPlannerService {
     estimateRouteId?: string;
     stopIdByLocalSid: Map<string, string>;
   } | undefined> {
-    const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
-
-    try {
-      const cached = await AsyncStorage.getItem(cacheKey);
-      if (cached) {
-        const parsed = JSON.parse(cached) as CachedTaipeiRouteStopMapping;
-        return {
-          officialRouteId: parsed.officialRouteId,
-          estimateRouteId: parsed.estimateRouteId,
-          stopIdByLocalSid: new Map(Object.entries(parsed.stopIdByLocalSid)),
-        };
-      }
-    } catch (error) {
-      console.warn('[BusPlanner] Failed to read Taipei route-stop mapping cache.', error);
+    const cachedMapping = await this.readCachedTaipeiRouteStopMapping(route);
+    if (cachedMapping) {
+      return cachedMapping;
     }
 
     const [routeRows, stopRows] = await Promise.all([
@@ -680,6 +808,7 @@ export class BusPlannerService {
     }
 
     try {
+      const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
       const cacheValue: CachedTaipeiRouteStopMapping = {
         officialRouteId: bestMatch.officialRouteId,
         estimateRouteId: bestMatch.officialRouteId,
@@ -697,68 +826,72 @@ export class BusPlannerService {
     };
   }
 
-  private async getRouteStopArrivalsFromTaipeiOpenData(
-    route: any
-  ): Promise<RouteDirectionDetails | undefined> {
-    const dataset = await this.fetchTaipeiEstimateDataset();
-    if (dataset.length === 0) {
+  private async readCachedTaipeiRouteStopMapping(route: any): Promise<{
+    officialRouteId: string;
+    estimateRouteId?: string;
+    stopIdByLocalSid: Map<string, string>;
+  } | undefined> {
+    const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
+
+    try {
+      const cached = await AsyncStorage.getItem(cacheKey);
+      if (!cached) {
+        return undefined;
+      }
+
+      const parsed = JSON.parse(cached) as CachedTaipeiRouteStopMapping;
+      return {
+        officialRouteId: parsed.officialRouteId,
+        estimateRouteId: parsed.estimateRouteId,
+        stopIdByLocalSid: new Map(Object.entries(parsed.stopIdByLocalSid)),
+      };
+    } catch (error) {
+      console.warn('[BusPlanner] Failed to read Taipei route-stop mapping cache.', error);
       return undefined;
     }
+  }
 
-    const mapping = await this.getTaipeiRouteStopMapping(route);
-    if (!mapping) {
-      return undefined;
+  private warmTaipeiRouteStopMapping(route: any): void {
+    const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
+    if (this.taipeiRouteStopMappingWarmups.has(cacheKey)) {
+      return;
     }
 
-    let routeId = mapping.estimateRouteId || mapping.officialRouteId;
-    let rows = dataset.filter(
-      item => String(this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? '') === routeId
+    this.taipeiRouteStopMappingWarmups.add(cacheKey);
+    this.getTaipeiRouteStopMapping(route)
+      .catch(error => {
+        console.warn('[BusPlanner] Failed to warm Taipei route-stop mapping.', error);
+      })
+      .finally(() => {
+        this.taipeiRouteStopMappingWarmups.delete(cacheKey);
+      });
+  }
+
+  private getEstimateRowsForRoute(
+    dataset: TaipeiEstimateRow[],
+    routeId: string | number | undefined,
+    direction: number
+  ): TaipeiEstimateRow[] {
+    if (routeId === undefined || routeId === null || routeId === '') {
+      return [];
+    }
+
+    const routeRows = dataset.filter(
+      item => String(this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? '') === String(routeId)
     );
+    const directionRows = routeRows.filter(row => {
+      const goBack = this.getEstimateField(row, ['GoBack', 'goBack']);
+      return goBack !== undefined && goBack !== null && String(goBack) === String(direction);
+    });
 
-    if (rows.length === 0) {
-      const localStopIds = new Set(Array.from(mapping.stopIdByLocalSid.values()));
-      const routeIdScores = new Map<string, number>();
+    return directionRows.length > 0 ? directionRows : routeRows;
+  }
 
-      for (const item of dataset) {
-        const stopId = String(
-          this.getEstimateField(item, ['StopID', 'stopId', 'StopId']) ?? ''
-        );
-        if (!localStopIds.has(stopId)) {
-          continue;
-        }
-
-        const candidateRouteId = String(
-          this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? ''
-        );
-        if (!candidateRouteId) {
-          continue;
-        }
-
-        routeIdScores.set(candidateRouteId, (routeIdScores.get(candidateRouteId) || 0) + 1);
-      }
-
-      const bestCandidate = Array.from(routeIdScores.entries()).sort((a, b) => b[1] - a[1])[0];
-      if (bestCandidate) {
-        routeId = bestCandidate[0];
-        rows = dataset.filter(
-          item => String(this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? '') === routeId
-        );
-
-        try {
-          const cacheKey = this.getTaipeiRouteStopMappingCacheKey(route.route_name, route.direction);
-          const cacheValue: CachedTaipeiRouteStopMapping = {
-            officialRouteId: mapping.officialRouteId,
-            estimateRouteId: routeId,
-            stopIdByLocalSid: Object.fromEntries(mapping.stopIdByLocalSid),
-          };
-          await AsyncStorage.setItem(cacheKey, JSON.stringify(cacheValue));
-          mapping.estimateRouteId = routeId;
-        } catch (error) {
-          console.warn('[BusPlanner] Failed to persist inferred estimate RouteID.', error);
-        }
-      }
-    }
-
+  private buildRouteStopArrivalsFromEstimateRows(
+    route: any,
+    rows: TaipeiEstimateRow[],
+    stopIdByLocalSid: Map<string, string>
+  ): { data: RouteDirectionDetails; matchedCount: number } | undefined {
     if (rows.length === 0) {
       return undefined;
     }
@@ -783,25 +916,135 @@ export class BusPlannerService {
       }
     }
 
-    return {
-      routeName: route.route_name,
-      rid: route.rid,
-      direction: route.direction,
-      directionText: this.getDirectionText(route.direction),
-      stops: (route.stops_sid as string[]).map((sid: string) => {
-        const info = this.getStopInfo(sid);
-        const officialStopId = mapping.stopIdByLocalSid.get(String(sid));
-        const realtime = officialStopId ? bestByStopId.get(officialStopId) : undefined;
+    let matchedCount = 0;
+    const stops = (route.stops_sid as string[]).map((sid: string) => {
+      const info = this.getStopInfo(sid);
+      const officialStopId = stopIdByLocalSid.get(String(sid));
+      const realtime = officialStopId ? bestByStopId.get(officialStopId) : undefined;
 
-        return {
-          sid,
-          slid: info?.slid,
-          name: info?.name || 'Unknown',
-          etaText: realtime?.etaText || '\u66ab\u7121\u8cc7\u6599',
-          rawTime: realtime?.rawTime ?? CONFIG.TIME_NOT_DEPARTED,
-        };
-      }),
+      if (realtime) {
+        matchedCount += 1;
+      }
+
+      return {
+        sid,
+        slid: info?.slid,
+        name: info?.name || 'Unknown',
+        etaText: realtime?.etaText || '\u66ab\u7121\u8cc7\u6599',
+        rawTime: realtime?.rawTime ?? CONFIG.TIME_NOT_DEPARTED,
+      };
+    });
+
+    return {
+      matchedCount,
+      data: {
+        routeName: route.route_name,
+        rid: route.rid,
+        direction: route.direction,
+        directionText: this.getDirectionText(route.direction),
+        stops,
+      },
     };
+  }
+
+  private isDirectEstimateResultUseful(matchedCount: number, stopCount: number): boolean {
+    if (matchedCount === 0) {
+      return false;
+    }
+
+    return matchedCount / Math.max(stopCount, 1) >= CONFIG.DIRECT_ESTIMATE_MIN_MATCH_RATIO;
+  }
+
+  private async getRouteStopArrivalsFromTaipeiOpenData(
+    route: any
+  ): Promise<RouteDirectionDetails | undefined> {
+    const dataset = await this.fetchTaipeiEstimateDataset();
+    if (dataset.length === 0) {
+      return undefined;
+    }
+
+    const cachedMapping = await this.readCachedTaipeiRouteStopMapping(route);
+    if (cachedMapping) {
+      const mappedRows = this.getEstimateRowsForRoute(
+        dataset,
+        cachedMapping.estimateRouteId || cachedMapping.officialRouteId,
+        route.direction
+      );
+      const mappedResult = this.buildRouteStopArrivalsFromEstimateRows(
+        route,
+        mappedRows,
+        cachedMapping.stopIdByLocalSid
+      );
+
+      if (mappedResult && mappedResult.matchedCount > 0) {
+        return mappedResult.data;
+      }
+    }
+
+    const directStopIds = new Map(
+      (route.stops_sid as string[]).map((sid: string) => [String(sid), String(sid)])
+    );
+    const directRows = this.getEstimateRowsForRoute(dataset, route.rid, route.direction);
+    const directResult = this.buildRouteStopArrivalsFromEstimateRows(route, directRows, directStopIds);
+
+    if (
+      directResult &&
+      this.isDirectEstimateResultUseful(directResult.matchedCount, route.stops_sid.length)
+    ) {
+      return directResult.data;
+    }
+
+    this.warmTaipeiRouteStopMapping(route);
+    return directResult?.matchedCount ? directResult.data : undefined;
+  }
+
+  private async getRouteStopArrivalsFromNewTaipeiOpenData(
+    route: any
+  ): Promise<RouteDirectionDetails | undefined> {
+    const dataset = await this.fetchNewTaipeiEstimateDataset(route.rid);
+    if (dataset.length === 0) {
+      return undefined;
+    }
+
+    const directStopIds = new Map(
+      (route.stops_sid as string[]).map((sid: string) => [String(sid), String(sid)])
+    );
+    const rows = this.getEstimateRowsForRoute(dataset, route.rid, route.direction);
+    const result = this.buildRouteStopArrivalsFromEstimateRows(route, rows, directStopIds);
+
+    return result?.matchedCount ? result.data : undefined;
+  }
+
+  private async getRouteStopArrivalsFromRouteDyna(
+    route: any
+  ): Promise<RouteDirectionDetails | undefined> {
+    const payload = await this.fetchRouteDynaByRouteIdCached(route.rid);
+    const stopRows = Array.isArray(payload?.Stop) ? payload.Stop : [];
+
+    if (stopRows.length === 0) {
+      return undefined;
+    }
+
+    const rows: TaipeiEstimateRow[] = [];
+    for (const stopRow of stopRows) {
+      const values = String(stopRow?.n1 || '').split(',');
+      if (values.length < 8) {
+        continue;
+      }
+
+      rows.push({
+        RouteID: values[2],
+        StopID: values[1],
+        EstimateTime: values[7],
+      });
+    }
+
+    const directStopIds = new Map(
+      (route.stops_sid as string[]).map((sid: string) => [String(sid), String(sid)])
+    );
+    const result = this.buildRouteStopArrivalsFromEstimateRows(route, rows, directStopIds);
+
+    return result?.matchedCount ? result.data : undefined;
   }
 
   // --- Helpers: Repository Logic ---
@@ -989,6 +1232,16 @@ export class BusPlannerService {
       console.warn('[BusPlanner] Taipei ETA source unavailable, falling back.', error);
     }
 
+    const routeDynaRealtime = await this.getRouteStopArrivalsFromRouteDyna(route);
+    if (routeDynaRealtime) {
+      return routeDynaRealtime;
+    }
+
+    const newTaipeiRealtime = await this.getRouteStopArrivalsFromNewTaipeiOpenData(route);
+    if (newTaipeiRealtime) {
+      return newTaipeiRealtime;
+    }
+
     const stops = (route.stops_sid as string[]).map((sid: string) => {
       const info = this.getStopInfo(sid);
       return {
@@ -1002,18 +1255,23 @@ export class BusPlannerService {
       (stop): stop is { sid: string; slid: string; name: string } => Boolean(stop.slid)
     );
 
-    const realtimeResults = await this.batchProcess(
-      stopsWithSlid,
-      async stop => {
-        const buses = await this.fetchRealtimeBySlidCached(stop.slid, stop.sid);
-        const match = buses.find((bus: any) => bus.rid === route.rid && bus.route === routeName);
+    const realtimeResults = await this.withTimeout(
+      this.batchProcess(
+        stopsWithSlid,
+        async stop => {
+          const buses = await this.fetchRealtimeBySlidCached(stop.slid, stop.sid);
+          const match = buses.find((bus: any) => bus.rid === route.rid && bus.route === routeName);
 
-        return {
-          sid: stop.sid,
-          etaText: match?.time_text || '\u66ab\u7121\u8cc7\u6599',
-          rawTime: typeof match?.raw_time === 'number' ? match.raw_time : CONFIG.TIME_NOT_DEPARTED,
-        };
-      }
+          return {
+            sid: stop.sid,
+            etaText: match?.time_text || '\u66ab\u7121\u8cc7\u6599',
+            rawTime: typeof match?.raw_time === 'number' ? match.raw_time : CONFIG.TIME_NOT_DEPARTED,
+          };
+        }
+      ),
+      CONFIG.ROUTE_DETAIL_FALLBACK_TIMEOUT_MS,
+      [],
+      `[BusPlanner] Route detail fallback timed out for ${routeName} ${direction}.`
     );
 
     const realtimeMap = new Map(realtimeResults.map(item => [item.sid, item]));
@@ -1127,8 +1385,8 @@ export class BusPlannerService {
 
     try {
         const [resHtml, resJson] = await Promise.all([
-            fetch(urlHtml).then(r => r.text()).catch(() => ""),
-            fetch(urlJson).then(r => r.json()).catch(() => null)
+            this.fetchWithTimeout(urlHtml).then(r => (r.ok ? r.text() : "")).catch(() => ""),
+            this.fetchWithTimeout(urlJson).then(r => (r.ok ? r.json() : null)).catch(() => null)
         ]);
 
         if (!resHtml) return [];
@@ -1228,7 +1486,7 @@ export class BusPlannerService {
             console.log('[BusPlanner] Using cached route plan, refreshing realtime data...');
             return await this.updateCachedBuses(cachedBuses);
         }
-    } catch (e) { /* ignore */ }
+    } catch { /* ignore */ }
 
     // 1. Find candidate routes from local topology.
     const matchedRoutes = this.findStaticRoutes(startName, endName);

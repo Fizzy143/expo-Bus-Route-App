@@ -1,6 +1,6 @@
-// Service Worker for PWA functionality
-const CACHE_NAME = 'taipei-bus-v1';
-const urlsToCache = [
+const APP_SHELL_CACHE = 'taipei-bus-app-shell-v2';
+const RUNTIME_CACHE = 'taipei-bus-runtime-v2';
+const APP_SHELL_URLS = [
   '/',
   '/index.html',
   '/manifest.json',
@@ -8,89 +8,104 @@ const urlsToCache = [
   '/assets/splash.png',
 ];
 
-// 安裝 Service Worker
-self.addEventListener('install', (event) => {
-  console.log('Service Worker installing...');
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      console.log('Opened cache');
-      return cache.addAll(urlsToCache).catch((err) => {
-        console.error('Failed to cache:', err);
-      });
-    })
+function isSameOrigin(requestUrl) {
+  return new URL(requestUrl).origin === self.location.origin;
+}
+
+function isNavigationRequest(request) {
+  return request.mode === 'navigate';
+}
+
+function isStaticAssetRequest(requestUrl) {
+  return /\.(?:js|css|png|jpg|jpeg|gif|svg|webp|ico|json|woff2?)$/i.test(
+    new URL(requestUrl).pathname
   );
-  self.skipWaiting();
+}
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(APP_SHELL_CACHE).then((cache) => cache.addAll(APP_SHELL_URLS))
+  );
 });
 
-// 啟動 Service Worker
 self.addEventListener('activate', (event) => {
-  console.log('Service Worker activating...');
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
+    caches.keys().then((cacheNames) =>
+      Promise.all(
         cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            console.log('Deleting old cache:', cacheName);
+          if (cacheName !== APP_SHELL_CACHE && cacheName !== RUNTIME_CACHE) {
             return caches.delete(cacheName);
           }
+          return Promise.resolve(false);
         })
-      );
-    })
+      )
+    )
   );
-  return self.clients.claim();
+  event.waitUntil(self.clients.claim());
 });
 
-// 攔截網路請求
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
 self.addEventListener('fetch', (event) => {
-  // 只快取 GET 請求
-  if (event.request.method !== 'GET') {
+  const { request } = event;
+
+  if (request.method !== 'GET') {
     return;
   }
 
-  // 跳過外部 API 請求的快取
-  if (event.request.url.includes('bus.gov.taipei') || 
-      event.request.url.includes('api.')) {
+  if (!isSameOrigin(request.url)) {
+    return;
+  }
+
+  if (isNavigationRequest(request)) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          const responseToCache = response.clone();
+          caches.open(RUNTIME_CACHE).then((cache) => {
+            cache.put(request, responseToCache);
+          });
+          return response;
+        })
+        .catch(async () => {
+          const cachedResponse = await caches.match(request);
+          return cachedResponse || caches.match('/index.html');
+        })
+    );
+    return;
+  }
+
+  if (!isStaticAssetRequest(request.url)) {
     return;
   }
 
   event.respondWith(
-    caches.match(event.request).then((response) => {
-      // 如果快取中有，直接返回
-      if (response) {
-        return response;
-      }
-
-      // 否則發起網路請求
-      return fetch(event.request).then((response) => {
-        // 檢查是否為有效回應
-        if (!response || response.status !== 200 || response.type !== 'basic') {
+    caches.match(request).then((cachedResponse) => {
+      const networkFetch = fetch(request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const responseToCache = response.clone();
+            caches.open(RUNTIME_CACHE).then((cache) => {
+              cache.put(request, responseToCache);
+            });
+          }
           return response;
-        }
+        })
+        .catch(() => cachedResponse);
 
-        // 複製回應（因為回應流只能用一次）
-        const responseToCache = response.clone();
-
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
-        });
-
-        return response;
-      }).catch((err) => {
-        console.error('Fetch failed:', err);
-        // 可以返回一個離線頁面
-        return caches.match('/index.html');
-      });
+      return cachedResponse || networkFetch;
     })
   );
 });
 
-// 處理推送通知（iOS 16.4+ 和 Android 支援）
 self.addEventListener('push', (event) => {
-  console.log('Push notification received:', event);
-  
   let notificationData = {
-    title: '台北公車',
-    body: '新的公車資訊',
+    title: 'Stop ToGo',
+    body: '你有新的到站通知',
     icon: '/assets/icon.png',
     badge: '/assets/icon.png',
     vibrate: [200, 100, 200],
@@ -98,7 +113,6 @@ self.addEventListener('push', (event) => {
     requireInteraction: false,
   };
 
-  // 解析推送資料
   if (event.data) {
     try {
       const data = event.data.json();
@@ -109,7 +123,7 @@ self.addEventListener('push', (event) => {
         data: data.data || {},
         actions: data.actions || [],
       };
-    } catch (e) {
+    } catch {
       notificationData.body = event.data.text();
     }
   }
@@ -128,12 +142,7 @@ self.addEventListener('push', (event) => {
   );
 });
 
-// 處理通知點擊
 self.addEventListener('notificationclick', (event) => {
-  console.log('Notification clicked:', event);
   event.notification.close();
-
-  event.waitUntil(
-    clients.openWindow('/')
-  );
+  event.waitUntil(clients.openWindow('/'));
 });

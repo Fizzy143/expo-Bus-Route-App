@@ -22,12 +22,15 @@ interface UIArrival {
   rawTime?: number; // 原始到站秒數，用於排序
 }
 
+const DEFAULT_STOP_NAME = '捷運公館站';
+
 export default function StopDetailScreen() {
   const router = useRouter();
-  const { name } = useLocalSearchParams<{ name?: string }>();
-  const stopName = name || '捷運公館站';
+  const { name } = useLocalSearchParams<{ name?: string | string[] }>();
+  const stopName = Array.isArray(name) ? name[0] : name;
   const AUTO_REFRESH_MS = 10000;
 
+  const [resolvedStopName, setResolvedStopName] = useState<string>(DEFAULT_STOP_NAME);
   const [arrivals, setArrivals] = useState<UIArrival[]>([]);
   const [lastUpdate, setLastUpdate] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(true);
@@ -52,11 +55,15 @@ export default function StopDetailScreen() {
     initService();
   }, []);
 
+  useEffect(() => {
+    setResolvedStopName(stopName || DEFAULT_STOP_NAME);
+  }, [stopName]);
+
   const fetchBusData = async (isAutoRefresh = false) => {
     try {
       if (!serviceReady) return;
       
-      const sids = plannerRef.current.getRepresentativeSids(stopName);
+      const sids = plannerRef.current.getRepresentativeSids(resolvedStopName);
       if (sids.length === 0) {
         setArrivals([]);
         setLastUpdate('無法識別站牌名稱');
@@ -279,7 +286,7 @@ export default function StopDetailScreen() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [stopName, serviceReady]);
+  }, [resolvedStopName, serviceReady]);
 
   const onRefresh = () => {
     const now = Date.now();
@@ -324,7 +331,7 @@ export default function StopDetailScreen() {
         <TouchableOpacity onPress={() => setTimeout(() => router.back(), 100)}>
           <Text style={styles.backArrow}>←</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>{stopName}</Text>
+        <Text style={styles.title}>{resolvedStopName}</Text>
       </View>
 
       {/* NOTE: 因為新 API fetchBusesAtSid 暫時不提供方向資訊，
