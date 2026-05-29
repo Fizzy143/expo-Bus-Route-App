@@ -157,7 +157,6 @@ export default function BusRouteDetailScreen() {
   const pendingCenterDirectionRef = useRef<number | null>(null);
   const pendingPagerDirectionIndexRef = useRef<number | null>(null);
   const hasAutoCenteredInitialRef = useRef(false);
-  const hasAppliedPreferredDirectionRef = useRef(false);
 
   const routeName = useMemo(() => {
     if (Array.isArray(params.routeName)) {
@@ -166,7 +165,7 @@ export default function BusRouteDetailScreen() {
     return params.routeName || DEFAULT_ROUTE_NAME;
   }, [params.routeName]);
 
-  const preferredDirection = useMemo(() => {
+  const preferredDirectionHint = useMemo(() => {
     const rawDirection = Array.isArray(params.preferredDirection)
       ? params.preferredDirection[0]
       : params.preferredDirection;
@@ -175,15 +174,7 @@ export default function BusRouteDetailScreen() {
       return null;
     }
 
-    const normalized = rawDirection.trim();
-    if (normalized === GO_TEXT) {
-      return 0;
-    }
-    if (normalized === BACKWARD_TEXT) {
-      return 1;
-    }
-
-    return null;
+    return rawDirection.trim() || null;
   }, [params.preferredDirection]);
 
   const preferredRid = useMemo(() => {
@@ -358,46 +349,75 @@ export default function BusRouteDetailScreen() {
           return;
         }
 
-        setRouteDetails(baseDetails);
-        setDirectionData(prev => (prev.length > 0 ? prev : baseDetails.directions));
+        const resolvedPreferredDirection =
+          preferredDirectionHint === null
+            ? null
+            : plannerRef.current.resolveRouteDirection(
+                routeName,
+                preferredRid || undefined,
+                preferredDirectionHint
+              );
+
+        const preferredIndex = (() => {
+          if (resolvedPreferredDirection !== null) {
+            const exactDirectionMatchIndex = baseDetails.directions.findIndex(
+              direction =>
+                direction.direction === resolvedPreferredDirection &&
+                (!preferredRid || direction.rid === preferredRid)
+            );
+            if (exactDirectionMatchIndex >= 0) {
+              return exactDirectionMatchIndex;
+            }
+
+            const directionMatchIndex = baseDetails.directions.findIndex(
+              direction => direction.direction === resolvedPreferredDirection
+            );
+            if (directionMatchIndex >= 0) {
+              return directionMatchIndex;
+            }
+          }
+
+          if (preferredRid) {
+            const ridMatchIndex = baseDetails.directions.findIndex(
+              direction => direction.rid === preferredRid
+            );
+            if (ridMatchIndex >= 0) {
+              return ridMatchIndex;
+            }
+          }
+
+          return -1;
+        })();
+
+        const orderedDirections =
+          preferredIndex > 0
+            ? [
+                baseDetails.directions[preferredIndex],
+                ...baseDetails.directions.filter((_, index) => index !== preferredIndex),
+              ]
+            : baseDetails.directions;
+        const normalizedBaseDetails =
+          orderedDirections === baseDetails.directions
+            ? baseDetails
+            : { ...baseDetails, directions: orderedDirections };
+
+        setRouteDetails(normalizedBaseDetails);
+        setDirectionData(prev => (prev.length > 0 ? prev : normalizedBaseDetails.directions));
         setLoading(false);
 
-        const preferredIndex = hasAppliedPreferredDirectionRef.current
-          ? -1
-          : (() => {
-              if (preferredRid) {
-                const ridMatchIndex = baseDetails.directions.findIndex(
-                  direction => direction.rid === preferredRid
-                );
-                if (ridMatchIndex >= 0) {
-                  return ridMatchIndex;
-                }
-              }
-
-              if (preferredDirection === null) {
-                return -1;
-              }
-
-              return baseDetails.directions.findIndex(
-                direction => direction.direction === preferredDirection
-              );
-            })();
-
-        if (preferredIndex >= 0 && preferredIndex !== selectedDirectionRef.current) {
-          selectedDirectionRef.current = preferredIndex;
-          setSelectedDirection(preferredIndex);
-          pendingPagerDirectionIndexRef.current = preferredIndex;
-          queueCenterDirection(baseDetails.directions[preferredIndex].direction);
-          hasAppliedPreferredDirectionRef.current = true;
-        } else if (
-          !hasAppliedPreferredDirectionRef.current &&
-          (preferredRid !== null || preferredDirection !== null)
-        ) {
-          hasAppliedPreferredDirectionRef.current = true;
+        if (preferredIndex >= 0) {
+          selectedDirectionRef.current = 0;
+          setSelectedDirection(0);
+          pendingPagerDirectionIndexRef.current = 0;
+          queueCenterDirection(normalizedBaseDetails.directions[0].direction);
         }
 
-        const activeIndex = Math.min(selectedDirectionRef.current, baseDetails.directions.length - 1);
-        const activeDirection = baseDetails.directions[activeIndex] || baseDetails.directions[0];
+        const activeIndex = Math.min(
+          selectedDirectionRef.current,
+          normalizedBaseDetails.directions.length - 1
+        );
+        const activeDirection =
+          normalizedBaseDetails.directions[activeIndex] || normalizedBaseDetails.directions[0];
         await loadSingleDirection(activeDirection, isRefresh);
       } catch (error) {
         console.error('Failed to load route details:', error);
@@ -407,7 +427,7 @@ export default function BusRouteDetailScreen() {
         setRefreshing(false);
       }
     },
-    [loadSingleDirection, preferredDirection, preferredRid, queueCenterDirection, routeName]
+    [loadSingleDirection, preferredDirectionHint, preferredRid, queueCenterDirection, routeName]
   );
 
   const ensureDirectionLoaded = useCallback(
@@ -446,7 +466,6 @@ export default function BusRouteDetailScreen() {
     pendingCenterDirectionRef.current = null;
     pendingPagerDirectionIndexRef.current = null;
     hasAutoCenteredInitialRef.current = false;
-    hasAppliedPreferredDirectionRef.current = false;
     setLastUpdateAt(null);
     loadRouteDetails();
 

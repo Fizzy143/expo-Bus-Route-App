@@ -1,16 +1,15 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    FlatList,
-    Platform,
-    RefreshControl,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  FlatList,
+  Platform,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-// 引入新版 Service
 import { BusPlannerService } from '../components/busPlanner';
 import { compareArrivals } from '../utils/routeSorter';
 
@@ -21,7 +20,7 @@ interface UIArrival {
   preferredDirection?: string;
   estimatedTime: string;
   key: string;
-  rawTime?: number; // 原始到站秒數，用於排序
+  rawTime?: number;
 }
 
 const DEFAULT_STOP_NAME = '捷運公館站';
@@ -31,6 +30,7 @@ export default function StopDetailScreen() {
   const { name } = useLocalSearchParams<{ name?: string | string[] }>();
   const stopName = Array.isArray(name) ? name[0] : name;
   const AUTO_REFRESH_MS = 10000;
+  const REFRESH_COOLDOWN = 3000;
 
   const [resolvedStopName, setResolvedStopName] = useState<string>(DEFAULT_STOP_NAME);
   const [arrivals, setArrivals] = useState<UIArrival[]>([]);
@@ -38,22 +38,16 @@ export default function StopDetailScreen() {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
-  
-  // 刷新冷卻時間（毫秒）
-  const REFRESH_COOLDOWN = 3000; // 3 秒
-  
-  // 注意：因為 fetchBusesAtSid 不回傳方向，暫時移除 Tabs 的過濾功能
-  // const [selectedTab, setSelectedTab] = useState<'去' | '回'>('去');
-  
+
   const plannerRef = useRef(new BusPlannerService());
   const [serviceReady, setServiceReady] = useState(false);
   const intervalRef = useRef<any>(null);
 
   useEffect(() => {
     const initService = async () => {
-      // 新版 BusPlannerService 不需要 initialize，constructor 已同步載入資料
       setServiceReady(true);
     };
+
     initService();
   }, []);
 
@@ -64,7 +58,7 @@ export default function StopDetailScreen() {
   const fetchBusData = async (isAutoRefresh = false) => {
     try {
       if (!serviceReady) return;
-      
+
       const sids = plannerRef.current.getRepresentativeSids(resolvedStopName);
       if (sids.length === 0) {
         setArrivals([]);
@@ -73,38 +67,56 @@ export default function StopDetailScreen() {
         return;
       }
 
-      // 抓取所有 SID 的公車資料（包含所有方向）
       const allResults = await Promise.all(
         sids.map(sid => plannerRef.current.fetchBusesAtSid(sid))
       );
       const allBuses = allResults.flat().flat();
-      
-      // 去重：使用 Map 以 rid+route+rawTime 為 key（不含 direction，因為同一 RID 同一時間不應有不同方向）
-      const uniqueBusesMap = new Map();
+
+      const getArrivalLookupKey = (
+        route: string,
+        rid?: string,
+        directionHint?: string
+      ) => `${rid || ''}-${route}-${(directionHint || '').trim()}`;
+
+      const getDisplayDirection = (
+        item: Pick<UIArrival, 'route' | 'rid' | 'preferredDirection' | 'direction'>
+      ) =>
+        plannerRef.current.getRouteDisplayDirection(
+          item.route,
+          item.rid,
+          item.preferredDirection || item.direction
+        );
+
+      const uniqueBusesMap = new Map<string, any>();
       allBuses.forEach(bus => {
-        const uniqueKey = `${bus.rid}-${bus.route}-${bus.rawTime}`;
+        const normalizedRawTime =
+          typeof bus.rawTime === 'number'
+            ? bus.rawTime
+            : typeof bus.raw_time === 'number'
+              ? bus.raw_time
+              : '';
+        const uniqueKey = `${bus.rid}-${bus.route}-${bus.direction || ''}-${normalizedRawTime}`;
         const existing = uniqueBusesMap.get(uniqueKey);
-        
-        // 如果已存在，優先保留有明確方向資訊的（非"去程"/"返程"的）
+
         if (!existing) {
           uniqueBusesMap.set(uniqueKey, bus);
-        } else if (existing.direction && (existing.direction === '去程' || existing.direction === '返程') &&
-                   bus.direction && bus.direction !== '去程' && bus.direction !== '返程') {
-          // 新的有更詳細的方向資訊，替換舊的
+        } else if (
+          existing.direction &&
+          (existing.direction === '去程' || existing.direction === '返程') &&
+          bus.direction &&
+          bus.direction !== '去程' &&
+          bus.direction !== '返程'
+        ) {
           uniqueBusesMap.set(uniqueKey, bus);
         }
       });
       const uniqueBuses = Array.from(uniqueBusesMap.values());
 
-      // 使用函數式更新來獲取最新的 arrivals 狀態
       setArrivals(prev => {
         if (isAutoRefresh && prev.length > 0) {
-
-          // 自動更新模式：合併新/舊資料，避免臨時的未發車/更新中覆蓋已存在的有效時間
           const TIME_NOT_DEPARTED = 99999;
           const TIME_UNKNOWN = 88888;
 
-          // 建立 rid+route 到舊資料的映射（包含 direction, rawTime, estimatedTime）
           const existingDataMap = new Map<
             string,
             {
@@ -114,179 +126,131 @@ export default function StopDetailScreen() {
               estimatedTime?: string;
             }
           >();
+
           prev.forEach(item => {
-            const parts = item.key.split('-');
-            if (parts.length >= 2) {
-              const lookupKey = `${parts[0]}-${parts[1]}`; // rid-route
-              existingDataMap.set(lookupKey, {
-                direction: item.direction,
-                preferredDirection: item.preferredDirection,
-                rawTime: typeof item.rawTime === 'number' ? item.rawTime : undefined,
-                estimatedTime: item.estimatedTime
-              });
-            }
+            const lookupKey = getArrivalLookupKey(
+              item.route,
+              item.rid,
+              item.preferredDirection || item.direction
+            );
+            existingDataMap.set(lookupKey, {
+              direction: item.direction,
+              preferredDirection: item.preferredDirection,
+              rawTime: typeof item.rawTime === 'number' ? item.rawTime : undefined,
+              estimatedTime: item.estimatedTime,
+            });
           });
 
-          // 若沒有任何新資料，保留舊資料
           if (!uniqueBuses || uniqueBuses.length === 0) return prev;
 
-          // 用新資料建立陣列，僅在新資料為有效數值或比舊資料更合理時才覆蓋舊資料
           const updated = uniqueBuses.map((bus, index) => {
-            const lookupKey = `${bus.rid}-${bus.route}`;
+            const lookupKey = getArrivalLookupKey(bus.route, bus.rid, bus.direction || '');
             const saved = existingDataMap.get(lookupKey);
 
-            const newRaw = (typeof bus.rawTime === 'number') ? bus.rawTime : (typeof bus.raw_time === 'number' ? bus.raw_time : TIME_NOT_DEPARTED);
+            const newRaw =
+              typeof bus.rawTime === 'number'
+                ? bus.rawTime
+                : typeof bus.raw_time === 'number'
+                  ? bus.raw_time
+                  : TIME_NOT_DEPARTED;
             const newText = bus.timeText || bus.time_text || '';
+            const resolvedPreferredDirection = saved?.preferredDirection || bus.direction || '';
+            const displayDirection = getDisplayDirection({
+              route: bus.route,
+              rid: bus.rid,
+              preferredDirection: resolvedPreferredDirection,
+              direction: saved?.direction || bus.direction || '',
+            });
 
-            const newIsTerminal = newRaw === TIME_NOT_DEPARTED || /未發車|末班|今日未營運|今日未|未營運|交管|交管不停/.test(String(newText));
+            const newIsTerminal =
+              newRaw === TIME_NOT_DEPARTED ||
+              /未發車|末班|今日未營運|今日未|未營運|交管|交管不停/.test(String(newText));
             const newIsUnknown = newRaw === TIME_UNKNOWN;
 
-            if (saved && typeof saved.rawTime === 'number' && saved.rawTime < TIME_NOT_DEPARTED && (newIsTerminal || newIsUnknown)) {
-              // 保留舊的有效時間與文字
+            if (
+              saved &&
+              typeof saved.rawTime === 'number' &&
+              saved.rawTime < TIME_NOT_DEPARTED &&
+              (newIsTerminal || newIsUnknown)
+            ) {
               return {
                 rid: bus.rid,
                 route: bus.route,
-                direction: saved.direction || bus.direction || '',
-                preferredDirection: saved.preferredDirection || bus.direction || '',
+                direction: displayDirection || saved.direction || bus.direction || '',
+                preferredDirection: resolvedPreferredDirection,
                 estimatedTime: saved.estimatedTime || (newText || '更新中'),
-                key: `${bus.rid}-${bus.route}-${saved.rawTime}-${index}`,
+                key: `${bus.rid}-${bus.route}-${resolvedPreferredDirection}-${saved.rawTime}-${index}`,
                 rawTime: saved.rawTime,
               };
             }
 
-            // 否則使用新的資料（包含 direction）
             return {
               rid: bus.rid,
               route: bus.route,
-              direction: saved?.direction || bus.direction || '',
-              preferredDirection: saved?.preferredDirection || bus.direction || '',
+              direction: displayDirection || saved?.direction || bus.direction || '',
+              preferredDirection: resolvedPreferredDirection,
               estimatedTime: newText || '更新中',
-              key: `${bus.rid}-${bus.route}-${newRaw}-${index}`,
+              key: `${bus.rid}-${bus.route}-${resolvedPreferredDirection}-${newRaw}-${index}`,
               rawTime: newRaw,
             };
           });
 
-          // 使用統一的比較器排序
           return updated.sort((a, b) => compareArrivals(a as any, b as any));
-        } else {
-          // 初始載入模式：先顯示路線名稱和時間，方向欄位暫時為空
-          // 注意：新版 BusPlanner 使用 time_text (下劃線格式) 和 direction 欄位
-          const initialData = uniqueBuses.map((bus, index) => ({
+        }
+
+        const initialData = uniqueBuses.map((bus, index) => {
+          const rawTime =
+            typeof bus.rawTime === 'number'
+              ? bus.rawTime
+              : typeof bus.raw_time === 'number'
+                ? bus.raw_time
+                : undefined;
+          const preferredDirection = bus.direction || '';
+          const direction =
+            getDisplayDirection({
+              route: bus.route,
+              rid: bus.rid,
+              preferredDirection,
+              direction: preferredDirection,
+            }) || preferredDirection;
+
+          return {
             rid: bus.rid,
             route: bus.route,
-            preferredDirection: bus.direction || '',
-            direction: bus.direction || '', // 新版已包含方向資訊
-            estimatedTime: bus.time_text || bus.timeText || '更新中', // 相容新舊格式
-            key: `${bus.rid}-${bus.route}-${bus.direction || ''}-${bus.rawTime}-${index}`, // 加入 index 確保唯一
-            rawTime: bus.rawTime, // 保留原始時間用於排序
-          }));
-          
-          // 使用統一的排序邏輯（到站優先）
-          return initialData.sort((a, b) => compareArrivals(a as any, b as any));
-        }
+            preferredDirection,
+            direction,
+            estimatedTime: bus.time_text || bus.timeText || '更新中',
+            key: `${bus.rid}-${bus.route}-${preferredDirection}-${rawTime}-${index}`,
+            rawTime,
+          };
+        });
+
+        return initialData.sort((a, b) => compareArrivals(a as any, b as any));
       });
 
       setLastUpdate(new Date().toLocaleTimeString());
 
-      // 初始載入時，立即設定終點站資訊（不使用背景更新）
       if (!isAutoRefresh) {
-        // 先批次獲取所有需要的路線結構
-        const ridSet = new Set(uniqueBuses.map(bus => bus.rid));
-        const routeStructures = new Map();
-        
-        for (const rid of ridSet) {
-          const structure = plannerRef.current.getRouteStructure(rid);
-          if (structure) {
-            routeStructures.set(rid, structure);
-          }
-        }
-        
-        // 同步更新所有公車的終點站資訊，並進一步去重相同路線和終點站的項目
         setArrivals(prev => {
-          const withDirections = prev.map((item, idx) => {
-            // 從 uniqueBuses 找到對應的公車資訊
-            const bus = uniqueBuses[idx];
-            if (!bus) return item;
-            
-            const structure = routeStructures.get(bus.rid);
-            if (!structure) return item;
-            
-            // getRouteStructure 回傳的結構中，goStops 和 backStops 只有一個會有資料
-            // 取有資料的那個
-            const stops = structure.goStops?.length > 0 ? structure.goStops : structure.backStops;
-            
-            // 取最後一個站點作為終點站
-            if (stops && stops.length > 0) {
-              const endStation = stops[stops.length - 1].name;
-              
-              // 調試：顯示羅斯福路幹線的詳細資訊
-              if (bus.route.includes('羅斯福路幹線')) {
-                console.log(`🔍 [羅斯福路幹線] RID: ${bus.rid}, 原始方向: ${bus.direction}, 終點站: ${endStation}, 時間: ${bus.timeText}`);
-              }
-              
-              return {
-                ...item,
-                direction: `往 ${endStation}`
-              };
-            }
-            
-            return item;
-          });
-          
-          // 檢查是否有同一路線指向相同終點站的情況
-          const routeEndStationCount = new Map<string, Set<string>>();
-          withDirections.forEach(item => {
-            const key = `${item.route}-${item.direction}`;
-            if (!routeEndStationCount.has(item.route)) {
-              routeEndStationCount.set(item.route, new Set());
-            }
-            routeEndStationCount.get(item.route)!.add(item.direction || '');
-          });
-          
-          // 如果某路線有多個項目指向同一終點站，改用原始方向區分
-          const needsOriginalDirection = new Set<string>();
-          routeEndStationCount.forEach((directions, route) => {
-            if (directions.size === 1) {
-              // 檢查這個路線-終點站組合是否有多個項目
-              const count = withDirections.filter(item => 
-                item.route === route && item.direction === Array.from(directions)[0]
-              ).length;
-              if (count > 1) {
-                needsOriginalDirection.add(route);
-                console.log(`⚠️ [${route}] 發現多個公車指向相同終點站，將使用原始方向標示`);
-              }
-            }
-          });
-          
-          // 重新處理需要使用原始方向的路線
-          const finalWithDirections = withDirections.map((item, idx) => {
-            const bus = uniqueBuses[idx];
-            if (bus && needsOriginalDirection.has(item.route)) {
-              // 使用原始方向（去程/返程）而非終點站
-              return {
-                ...item,
-                direction: bus.direction || item.direction
-              };
-            }
-            return item;
-          });
-          
-          // 最終去重：用 route-direction-rawTime 確保不重複
           const finalDeduped = new Map<string, UIArrival>();
-          finalWithDirections.forEach(item => {
-            const dedupKey = `${item.route}-${item.direction}-${item.rawTime}`;
+
+          prev.forEach(item => {
+            const displayDirection = getDisplayDirection(item);
+            const nextItem = displayDirection ? { ...item, direction: displayDirection } : item;
+            const dedupKey = `${nextItem.route}-${nextItem.direction}-${nextItem.rawTime}`;
+
             if (!finalDeduped.has(dedupKey)) {
-              finalDeduped.set(dedupKey, item);
+              finalDeduped.set(dedupKey, nextItem);
             }
           });
-          
-          // 轉換回陣列並使用統一的排序邏輯（到站優先）
-          return Array.from(finalDeduped.values()).sort((a, b) => compareArrivals(a as any, b as any));
+
+          return Array.from(finalDeduped.values()).sort((a, b) =>
+            compareArrivals(a as any, b as any)
+          );
         });
       }
-
     } catch (error) {
-      console.error('🚨 Failed to fetch bus data:', error);
+      console.error('Failed to fetch bus data:', error);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -295,11 +259,12 @@ export default function StopDetailScreen() {
 
   useEffect(() => {
     if (serviceReady) {
-      fetchBusData(false); // 初始載入
+      fetchBusData(false);
       intervalRef.current = setInterval(() => {
         fetchBusData(true);
-      }, AUTO_REFRESH_MS); // 自動更新傳 true
+      }, AUTO_REFRESH_MS);
     }
+
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
@@ -308,16 +273,15 @@ export default function StopDetailScreen() {
   const onRefresh = () => {
     const now = Date.now();
     const timeSinceLastRefresh = now - lastRefreshTime;
-    
-    // 如果距離上次刷新少於冷卻時間，則忽略
+
     if (timeSinceLastRefresh < REFRESH_COOLDOWN) {
       console.log(`請稍候 ${Math.ceil((REFRESH_COOLDOWN - timeSinceLastRefresh) / 1000)} 秒後再刷新`);
       return;
     }
-    
+
     setLastRefreshTime(now);
     setRefreshing(true);
-    fetchBusData(false); // 手動刷新重新載入所有資料
+    fetchBusData(false);
   };
 
   const openRouteDetails = (item: UIArrival) => {
@@ -346,9 +310,7 @@ export default function StopDetailScreen() {
       <TouchableOpacity style={styles.row} onPress={() => openRouteDetails(item)} activeOpacity={0.72}>
         <View style={styles.routeInfo}>
           <Text style={styles.route}>{item.route}</Text>
-          {item.direction && (
-            <Text style={styles.direction}>{item.direction || ''}</Text>
-          )}
+          {item.direction && <Text style={styles.direction}>{item.direction}</Text>}
         </View>
         <View style={[styles.badge, { backgroundColor: badgeColor }]}>
           <Text style={styles.badgeText}>{timeText}</Text>
@@ -359,7 +321,6 @@ export default function StopDetailScreen() {
 
   return (
     <View style={styles.container}>
-      {/* 上方標題 */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setTimeout(() => router.back(), 100)}>
           <Text style={styles.backArrow}>←</Text>
@@ -367,14 +328,10 @@ export default function StopDetailScreen() {
         <Text style={styles.title}>{resolvedStopName}</Text>
       </View>
 
-      {/* NOTE: 因為新 API fetchBusesAtSid 暫時不提供方向資訊，
-        這裡隱藏了原本的「去/回」Tabs，改為顯示所有經過的公車。
-      */}
       <View style={styles.subHeader}>
         <Text style={styles.subHeaderText}>所有經過路線</Text>
       </View>
 
-      {/* 列表 */}
       {loading ? (
         <View style={styles.loading}>
           <ActivityIndicator size="large" color="#6F73F8" />
@@ -384,14 +341,12 @@ export default function StopDetailScreen() {
         <FlatList
           data={arrivals}
           renderItem={renderBusItem}
-          keyExtractor={(item) => item.key}
+          keyExtractor={item => item.key}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text style={styles.emptyText}>
-                {lastUpdate === '無法識別站牌名稱'
-                  ? '查無此站牌，請確認名稱'
-                  : '目前無公車資訊'}
+                {lastUpdate === '無法識別站牌名稱' ? '查無此站牌，請確認名稱' : '目前無公車資訊'}
               </Text>
             </View>
           }
@@ -402,10 +357,10 @@ export default function StopDetailScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { 
-    flex: 1, 
-    backgroundColor: '#152021', 
-    paddingTop: Platform.OS === 'ios' ? 50 : 28 
+  container: {
+    flex: 1,
+    backgroundColor: '#152021',
+    paddingTop: Platform.OS === 'ios' ? 50 : 28,
   },
   header: {
     flexDirection: 'row',
@@ -438,9 +393,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   route: { color: '#fff', fontSize: 22, fontWeight: '700' },
-  direction: { 
-    color: '#aaa', 
-    fontSize: 14, 
+  direction: {
+    color: '#aaa',
+    fontSize: 14,
     marginTop: 3,
   },
   badge: {

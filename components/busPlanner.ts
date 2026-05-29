@@ -1072,6 +1072,125 @@ export class BusPlannerService {
     return direction === 0 ? '\u53bb\u7a0b' : '\u8fd4\u7a0b';
   }
 
+  private normalizeDirectionHint(directionHint: string): string {
+    return directionHint.replace(/^往\s*/, '').trim();
+  }
+
+  private getRouteTerminalStopNameFromRoute(route: any): string | undefined {
+    const stopSids = Array.isArray(route.stops_sid) ? (route.stops_sid as string[]) : [];
+    const lastSid = stopSids[stopSids.length - 1];
+    if (!lastSid) return undefined;
+
+    const info = this.getStopInfo(lastSid);
+    return info?.name?.trim() || undefined;
+  }
+
+  private getRoutesForDisplay(routeName: string, rid?: string): any[] {
+    const routesByName = this.routeDb.filter(route => route.route_name === routeName);
+    if (!rid) {
+      return routesByName;
+    }
+
+    const routesByNameAndRid = routesByName.filter(route => route.rid === rid);
+    return routesByNameAndRid.length > 0 ? routesByNameAndRid : routesByName;
+  }
+
+  public resolveRouteDirection(
+    routeName: string,
+    rid?: string,
+    directionHint?: number | string
+  ): number | undefined {
+    const candidates = this.getRoutesForDisplay(routeName, rid);
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    if (typeof directionHint === 'number') {
+      const exactDirection = candidates.find(route => route.direction === directionHint);
+      if (exactDirection) {
+        return exactDirection.direction;
+      }
+    }
+
+    if (typeof directionHint === 'string') {
+      const normalizedHint = this.normalizeDirectionHint(directionHint);
+
+      if (normalizedHint === this.getDirectionText(0)) {
+        return candidates.some(route => route.direction === 0) ? 0 : undefined;
+      }
+
+      if (normalizedHint === this.getDirectionText(1)) {
+        return candidates.some(route => route.direction === 1) ? 1 : undefined;
+      }
+
+      if (normalizedHint) {
+        const terminalMatches = candidates.filter(route => {
+          const terminalStopName = this.getRouteTerminalStopNameFromRoute(route);
+          return terminalStopName && this.normalizeDirectionHint(terminalStopName) === normalizedHint;
+        });
+
+        if (terminalMatches.length === 1) {
+          return terminalMatches[0].direction;
+        }
+
+        const stopMatches = candidates.filter(route =>
+          (route.stops_sid as string[]).some((sid: string) => {
+            const stopName = this.getStopInfo(sid)?.name?.trim();
+            return stopName && this.normalizeDirectionHint(stopName) === normalizedHint;
+          })
+        );
+
+        if (stopMatches.length === 1) {
+          return stopMatches[0].direction;
+        }
+      }
+    }
+
+    if (candidates.length === 1) {
+      return candidates[0].direction;
+    }
+
+    return undefined;
+  }
+
+  public getRouteTerminalStopName(
+    routeName: string,
+    rid?: string,
+    directionHint?: number | string
+  ): string | undefined {
+    const candidates = this.getRoutesForDisplay(routeName, rid);
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    const resolvedDirection = this.resolveRouteDirection(routeName, rid, directionHint);
+    const route =
+      candidates.find(candidate => candidate.direction === resolvedDirection) ?? candidates[0];
+
+    return this.getRouteTerminalStopNameFromRoute(route);
+  }
+
+  public getRouteDisplayDirection(
+    routeName: string,
+    rid?: string,
+    directionHint?: number | string
+  ): string {
+    const terminalStopName = this.getRouteTerminalStopName(routeName, rid, directionHint);
+    if (terminalStopName) {
+      return `\u5f80 ${terminalStopName}`;
+    }
+
+    if (typeof directionHint === 'number') {
+      return this.getDirectionText(directionHint);
+    }
+
+    if (typeof directionHint === 'string') {
+      return directionHint.trim();
+    }
+
+    return '';
+  }
+
 
   // --- Public API Methods ---
 

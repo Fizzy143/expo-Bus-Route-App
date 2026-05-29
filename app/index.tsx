@@ -33,8 +33,10 @@ import { compareArrivals } from '../utils/routeSorter';
 
 // 定義 UI 用的介面 (配合新 API 的回傳結構進行適配)
 interface UIArrival {
+  rid?: string;
   route: string;
   routeName?: string;
+  preferredDirection?: string;
   direction?: string; // 加入方向資訊（選填，因為有些情況可能沒有）
   estimatedTime: string;
   key: string;
@@ -123,7 +125,11 @@ export default function StopScreen() {
     inputRange: [0, 1],
     outputRange: [0, 250],
   });
-  const openRouteDetails = (routeName?: string, direction?: string) => {
+  const openRouteDetails = (
+    routeName?: string,
+    preferredRid?: string,
+    preferredDirection?: string
+  ) => {
     const normalizedRouteName = routeName?.trim();
     if (!normalizedRouteName || normalizedRouteName === '載入中') {
       return;
@@ -134,7 +140,8 @@ export default function StopScreen() {
       pathname: '/bus-route' as any,
       params: {
         routeName: normalizedRouteName,
-        preferredDirection: direction?.trim() || undefined,
+        preferredRid: preferredRid?.trim() || undefined,
+        preferredDirection: preferredDirection?.trim() || undefined,
       },
     });
   };
@@ -302,8 +309,10 @@ export default function StopScreen() {
       const uiArrivals: UIArrival[] = allBuses
         .sort((a, b) => compareArrivals(a, b))
         .map((bus) => ({
+          rid: bus.rid,
           route: bus.route,
           routeName: bus.route,
+          preferredDirection: bus.direction || '',
           estimatedTime: bus.timeText,
           key: `${bus.rid}-${bus.route}-${bus.direction || 'default'}`, // 使用 rid+route+direction 區分
         }));
@@ -581,8 +590,10 @@ export default function StopScreen() {
       // 轉換 plan() 的結果為 UI 格式（先用共用 comparator 排序 plans）
       plans.sort((a, b) => compareArrivals(a, b));
       const favoriteArrivals: UIArrival[] = plans.map((bus) => ({
+        rid: bus.rid,
         route: bus.routeName,
         routeName: bus.routeName,
+        preferredDirection: bus.directionText || '',
         direction: bus.directionText || '', // 使用 plan() 提供的方向資訊
         estimatedTime: bus.arrivalTimeText || '更新中',
         key: `fav-${route.id}-${bus.rid}-${bus.routeName}-${bus.rawTime || 0}`,
@@ -853,15 +864,12 @@ export default function StopScreen() {
   };
 
   const renderItem = ({ item }: { item: UIArrival }) => (
-    <TouchableOpacity onPress={() => openRouteDetails(item.routeName, item.direction)}>
+    <TouchableOpacity
+      onPress={() => openRouteDetails(item.routeName, item.rid, item.preferredDirection)}
+    >
       <View style={styles.row}>
         <View style={{ flex: 1 }}>
           <Text style={styles.route}>{item.route}</Text>
-          {item.direction && (
-            <Text style={[styles.directionText, { fontSize: 12, color: '#666', marginTop: 2 }]}>
-              {item.direction}
-            </Text>
-          )}
         </View>
         <View style={{ alignItems: 'flex-end' }}>{renderBadge(item.estimatedTime)}</View>
       </View>
@@ -869,7 +877,9 @@ export default function StopScreen() {
   );
 
   const renderFavoriteRouteItem = ({ item }: { item: UIArrival }) => (
-    <TouchableOpacity onPress={() => openRouteDetails(item.routeName, item.direction)}>
+    <TouchableOpacity
+      onPress={() => openRouteDetails(item.routeName, item.rid, item.preferredDirection)}
+    >
       <View style={styles.row}>
         <View style={{ flex: 1 }}>
           <Text style={styles.route}>{item.route}</Text>

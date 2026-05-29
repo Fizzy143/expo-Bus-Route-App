@@ -42,6 +42,11 @@ export default function MapNative() {
   const routeUpdateIntervalRef = useRef<any>(null); // 路線更新定時器
   const [isUpdatingRoute, setIsUpdatingRoute] = useState<boolean>(false); // 是否正在更新路線
 
+  const getRouteDisplayDirection = (route: BusInfo) =>
+    plannerRef.current.getRouteDisplayDirection(route.routeName, route.rid, route.directionText) ||
+    route.directionText ||
+    '';
+
   const stopsList: StopEntry[] = useMemo(() => {
     const out: StopEntry[] = [];
     const raw: any = stopsRaw;
@@ -182,7 +187,12 @@ export default function MapNative() {
         console.log('找到路線數量:', routes.length);
         if (routes.length > 0) {
           console.log('第一條路線:', routes[0].routeName, routes[0].directionText);
-          setRouteInfo(routes);
+          setRouteInfo(
+            routes.map(route => ({
+              ...route,
+              directionText: getRouteDisplayDirection(route),
+            }))
+          );
         }
       } catch (error) {
         console.error('路線規劃初始化錯誤:', error);
@@ -201,7 +211,12 @@ export default function MapNative() {
       // 重新查詢路線以獲取最新的到站時間
       const routes = await plannerRef.current.plan('師大分部', '師大');
       if (routes.length > 0) {
-        setRouteInfo(routes);
+        setRouteInfo(
+          routes.map(route => ({
+            ...route,
+            directionText: getRouteDisplayDirection(route),
+          }))
+        );
         console.log('路線動態更新完成，找到', routes.length, '條路線');
       }
     } catch (error) {
