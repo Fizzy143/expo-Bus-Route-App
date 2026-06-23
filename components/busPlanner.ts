@@ -6,6 +6,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as cheerio from 'cheerio';
+import { ungzip } from 'pako';
 
 // Local static datasets are bundled with the app so route topology can be
 // resolved without fetching extra files at runtime.
@@ -202,10 +203,14 @@ export class BusPlannerService {
   };
 
   private routeDb: any[]; // metro_bus_routes.json
+  private static routeStopArrivalsCache = new Map<string, { expiresAt: number; data: RouteDirectionDetails }>();
+  private static routeStopArrivalsInFlight = new Map<string, Promise<RouteDirectionDetails | undefined>>();
   private realtimeCache = new Map<string, { expiresAt: number; data: any[] }>();
   private realtimeInFlight = new Map<string, Promise<any[]>>();
+  private staticStopRoutesCache = new Map<string, any[]>();
   private routeDynaCache = new Map<string, { expiresAt: number; data: any }>();
   private routeDynaInFlight = new Map<string, Promise<any>>();
+  private routeDynaUnavailableKeys = new Set<string>();
   private taipeiEstimateCache: { expiresAt: number; data: TaipeiEstimateRow[] } | null = null;
   private taipeiEstimateInFlight: Promise<TaipeiEstimateRow[]> | null = null;
   private taipeiRouteCache: { expiresAt: number; data: TaipeiRouteRow[] } | null = null;
@@ -225,6 +230,10 @@ export class BusPlannerService {
 
   private getRealtimeCacheKey(slid: string, repSid: string): string {
     return `${slid}:${repSid}`;
+  }
+
+  private getRouteStopArrivalsCacheKey(routeName: string, direction: number): string {
+    return `${routeName}:${direction}`;
   }
 
   private async fetchRealtimeBySlidCached(slid: string, repSid: string): Promise<any[]> {
@@ -258,16 +267,17 @@ export class BusPlannerService {
   }
 
   private isWebEstimateSourceAvailable(): boolean {
-    return (
-      typeof window !== 'undefined' &&
-      typeof DecompressionStream !== 'undefined' &&
-      typeof Response !== 'undefined'
-    );
+    return typeof fetch === 'function';
   }
 
   private async decompressGzipToText(buffer: ArrayBuffer): Promise<string> {
-    const stream = new Blob([buffer]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return new Response(stream).text();
+    if (typeof DecompressionStream !== 'undefined' && typeof Response !== 'undefined') {
+      const stream = new Blob([buffer]).stream().pipeThrough(new DecompressionStream('gzip'));
+      return new Response(stream).text();
+    }
+
+    const text = ungzip(new Uint8Array(buffer), { to: 'string' });
+    return typeof text === 'string' ? text : new TextDecoder('utf-8').decode(text);
   }
 
   private parseTaipeiEstimatePayload(text: string): TaipeiEstimateRow[] {
@@ -553,10 +563,17 @@ export class BusPlannerService {
           expiresAt: Date.now() + CONFIG.REALTIME_CACHE_TTL_MS,
           data,
         });
+        this.routeDynaUnavailableKeys.delete(cacheKey);
         return data;
       })
       .catch(error => {
-        console.warn('[BusPlanner] RouteDyna source unavailable.', error);
+        if (!this.routeDynaUnavailableKeys.has(cacheKey)) {
+          console.warn(
+            `[BusPlanner] RouteDyna source unavailable for route ${cacheKey}; using fallback sources.`,
+            error
+          );
+          this.routeDynaUnavailableKeys.add(cacheKey);
+        }
         return null;
       })
       .finally(() => {
@@ -887,6 +904,19 @@ export class BusPlannerService {
     return directionRows.length > 0 ? directionRows : routeRows;
   }
 
+  private getAllEstimateRowsForRoute(
+    dataset: TaipeiEstimateRow[],
+    routeId: string | number | undefined
+  ): TaipeiEstimateRow[] {
+    if (routeId === undefined || routeId === null || routeId === '') {
+      return [];
+    }
+
+    return dataset.filter(
+      item => String(this.getEstimateField(item, ['RouteID', 'routeId', 'RouteId']) ?? '') === String(routeId)
+    );
+  }
+
   private buildRouteStopArrivalsFromEstimateRows(
     route: any,
     rows: TaipeiEstimateRow[],
@@ -963,29 +993,30 @@ export class BusPlannerService {
       return undefined;
     }
 
-    const cachedMapping = await this.readCachedTaipeiRouteStopMapping(route);
-    if (cachedMapping) {
-      const mappedRows = this.getEstimateRowsForRoute(
-        dataset,
-        cachedMapping.estimateRouteId || cachedMapping.officialRouteId,
-        route.direction
-      );
-      const mappedResult = this.buildRouteStopArrivalsFromEstimateRows(
-        route,
-        mappedRows,
-        cachedMapping.stopIdByLocalSid
-      );
-
-      if (mappedResult && mappedResult.matchedCount > 0) {
-        return mappedResult.data;
-      }
-    }
-
     const directStopIds = new Map(
       (route.stops_sid as string[]).map((sid: string) => [String(sid), String(sid)])
     );
     const directRows = this.getEstimateRowsForRoute(dataset, route.rid, route.direction);
     const directResult = this.buildRouteStopArrivalsFromEstimateRows(route, directRows, directStopIds);
+
+    const mappedMapping = await this.getTaipeiRouteStopMapping(route);
+    const mappedResult = mappedMapping
+      ? this.buildRouteStopArrivalsFromEstimateRows(
+          route,
+          this.getAllEstimateRowsForRoute(
+            dataset,
+            mappedMapping.estimateRouteId || mappedMapping.officialRouteId
+          ),
+          mappedMapping.stopIdByLocalSid
+        )
+      : undefined;
+
+    if (
+      mappedResult &&
+      (!directResult || mappedResult.matchedCount >= directResult.matchedCount)
+    ) {
+      return mappedResult.data;
+    }
 
     if (
       directResult &&
@@ -994,7 +1025,6 @@ export class BusPlannerService {
       return directResult.data;
     }
 
-    this.warmTaipeiRouteStopMapping(route);
     return directResult?.matchedCount ? directResult.data : undefined;
   }
 
@@ -1191,6 +1221,160 @@ export class BusPlannerService {
     return '';
   }
 
+  private shouldHydrateRouteStopArrival(bus: BusInfo): boolean {
+    const currentText = String(bus.arrivalTimeText || '').trim();
+    if (!currentText) {
+      return true;
+    }
+
+    return (
+      bus.rawTime >= CONFIG.TIME_NOT_DEPARTED ||
+      currentText === BusStatus.NOT_DEPARTED ||
+      currentText === BusStatus.UNKNOWN
+    );
+  }
+
+  private isUsefulRouteStopArrival(etaText: string, rawTime: number): boolean {
+    const text = etaText.trim();
+    if (!text) {
+      return false;
+    }
+
+    if (text === BusStatus.UNKNOWN) {
+      return false;
+    }
+
+    return rawTime < CONFIG.TIME_NOT_DEPARTED || text !== BusStatus.NOT_DEPARTED;
+  }
+
+  private async findUsefulRouteStopArrival(
+    routeName: string,
+    rid: string | undefined,
+    directionHint: number | string | undefined,
+    sid: string
+  ): Promise<{ etaText: string; rawTime: number } | undefined> {
+    const resolvedDirection = this.resolveRouteDirection(routeName, rid, directionHint);
+    if (resolvedDirection === undefined) {
+      return undefined;
+    }
+
+    try {
+      const directionDetails = await this.getRouteStopArrivals(routeName, resolvedDirection);
+      const currentStopInfo = this.getStopInfo(sid);
+      const matchedStop =
+        directionDetails?.stops.find(stop => stop.sid === sid) ||
+        (currentStopInfo?.slid
+          ? directionDetails?.stops.find(stop => stop.slid === currentStopInfo.slid)
+          : undefined) ||
+        (currentStopInfo?.name
+          ? directionDetails?.stops.find(stop => stop.name === currentStopInfo.name)
+          : undefined);
+      if (!matchedStop) {
+        return undefined;
+      }
+
+      const etaText = String(matchedStop.etaText || '').trim();
+      const rawTime =
+        typeof matchedStop.rawTime === 'number' ? matchedStop.rawTime : CONFIG.TIME_NOT_DEPARTED;
+
+      if (!this.isUsefulRouteStopArrival(etaText, rawTime)) {
+        return undefined;
+      }
+
+      return { etaText, rawTime };
+    } catch (error) {
+      console.warn(
+        `[BusPlanner] Failed to hydrate route-stop realtime for ${routeName} (${rid || 'unknown'}).`,
+        error
+      );
+      return undefined;
+    }
+  }
+
+  private async hydrateBusArrivalFromRouteStop(bus: BusInfo): Promise<BusInfo> {
+    if (!this.shouldHydrateRouteStopArrival(bus)) {
+      return bus;
+    }
+
+    const routeStopArrival = await this.findUsefulRouteStopArrival(
+      bus.routeName,
+      bus.rid,
+      bus.directionText,
+      bus.sid
+    );
+
+    if (!routeStopArrival) {
+      return bus;
+    }
+
+    return {
+      ...bus,
+      arrivalTimeText: routeStopArrival.etaText,
+      rawTime: routeStopArrival.rawTime,
+    };
+  }
+
+  private async hydrateBusesFromRouteStops(buses: BusInfo[]): Promise<BusInfo[]> {
+    if (buses.length === 0) {
+      return buses;
+    }
+
+    return Promise.all(buses.map(bus => this.hydrateBusArrivalFromRouteStop(bus)));
+  }
+
+  private shouldHydrateRealtimeBusArrival(bus: any): boolean {
+    const currentText = String(bus.time_text || bus.timeText || '').trim();
+    const rawTime =
+      typeof bus.raw_time === 'number'
+        ? bus.raw_time
+        : typeof bus.rawTime === 'number'
+          ? bus.rawTime
+          : CONFIG.TIME_NOT_DEPARTED;
+
+    if (!currentText) {
+      return true;
+    }
+
+    return (
+      rawTime >= CONFIG.TIME_NOT_DEPARTED ||
+      currentText === BusStatus.NOT_DEPARTED ||
+      currentText === BusStatus.UNKNOWN
+    );
+  }
+
+  private async hydrateRealtimeBusFromRouteStop(bus: any): Promise<any> {
+    if (!this.shouldHydrateRealtimeBusArrival(bus)) {
+      return bus;
+    }
+
+    const routeStopArrival = await this.findUsefulRouteStopArrival(
+      String(bus.route || ''),
+      typeof bus.rid === 'string' ? bus.rid : undefined,
+      bus.direction,
+      String(bus.sid || '')
+    );
+
+    if (!routeStopArrival) {
+      return bus;
+    }
+
+    return {
+      ...bus,
+      time_text: routeStopArrival.etaText,
+      timeText: routeStopArrival.etaText,
+      raw_time: routeStopArrival.rawTime,
+      rawTime: routeStopArrival.rawTime,
+    };
+  }
+
+  private async hydrateRealtimeBusesFromRouteStops(buses: any[]): Promise<any[]> {
+    if (buses.length === 0) {
+      return buses;
+    }
+
+    return Promise.all(buses.map(bus => this.hydrateRealtimeBusFromRouteStop(bus)));
+  }
+
 
   // --- Public API Methods ---
 
@@ -1332,7 +1516,7 @@ export class BusPlannerService {
       })),
     };
   }
-  public async getRouteStopArrivals(
+  private async fetchRouteStopArrivalsUncached(
     routeName: string,
     direction: number
   ): Promise<RouteDirectionDetails | undefined> {
@@ -1415,11 +1599,59 @@ export class BusPlannerService {
     return fallbackResult;
   }
 
+  public async getRouteStopArrivals(
+    routeName: string,
+    direction: number
+  ): Promise<RouteDirectionDetails | undefined> {
+    const cacheKey = this.getRouteStopArrivalsCacheKey(routeName, direction);
+    const now = Date.now();
+    const cached = BusPlannerService.routeStopArrivalsCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+
+    const existingRequest = BusPlannerService.routeStopArrivalsInFlight.get(cacheKey);
+    if (existingRequest) {
+      return existingRequest;
+    }
+
+    const request = this.fetchRouteStopArrivalsUncached(routeName, direction)
+      .then(data => {
+        if (data) {
+          BusPlannerService.routeStopArrivalsCache.set(cacheKey, {
+            expiresAt: Date.now() + CONFIG.REALTIME_CACHE_TTL_MS,
+            data,
+          });
+        }
+
+        return data;
+      })
+      .finally(() => {
+        BusPlannerService.routeStopArrivalsInFlight.delete(cacheKey);
+      });
+
+    BusPlannerService.routeStopArrivalsInFlight.set(cacheKey, request);
+    return request;
+  }
+
+  public async prefetchRouteStopArrivals(
+    routeName: string,
+    rid?: string,
+    directionHint?: number | string
+  ): Promise<RouteDirectionDetails | undefined> {
+    const direction = this.resolveRouteDirection(routeName, rid, directionHint);
+    if (direction === undefined) {
+      return undefined;
+    }
+
+    return this.getRouteStopArrivals(routeName, direction);
+  }
+
   public async fetchBusesAtSid(sid: string): Promise<any[]> {
     const info = this.getStopInfo(sid);
     if (!info) return [];
 
-    const stopName = info.name;
     const slid = info.slid;
 
     if (!slid) {
@@ -1428,7 +1660,7 @@ export class BusPlannerService {
     }
 
     // Reuse the stop SLID directly when the caller already resolved it.
-    return this.getArrivalsBySlid(slid, stopName);
+    return this.getArrivalsBySlid(slid, sid);
   }
 
   private findStaticRoutes(startName: string, endName: string): StaticRouteMatch[] {
@@ -1498,7 +1730,74 @@ export class BusPlannerService {
     return results;
   }
 
+  private shouldUseStaticStopRouteLookup(): boolean {
+    return typeof window !== 'undefined' && CONFIG.BASE_URL.includes('api.codetabs.com');
+  }
+
+  private getStaticRealtimeRoutesForStop(repSid: string): any[] {
+    const repInfo = this.getStopInfo(repSid);
+    if (!repInfo) {
+      return [];
+    }
+
+    const cacheKey = `${repInfo.slid || ''}:${repInfo.name}`;
+    const cached = this.staticStopRoutesCache.get(cacheKey);
+    if (cached) {
+      return cached.map(item => ({ ...item }));
+    }
+
+    const seen = new Set<string>();
+    const targetSlid = repInfo.slid;
+    const targetName = repInfo.name;
+    const candidates: any[] = [];
+
+    for (const route of this.routeDb) {
+      const matchedSid = (route.stops_sid as string[]).find((sid: string) => {
+        const info = this.getStopInfo(sid);
+        if (!info) {
+          return false;
+        }
+
+        if (targetSlid && info.slid === targetSlid) {
+          return true;
+        }
+
+        return info.name === targetName;
+      });
+
+      if (!matchedSid) {
+        continue;
+      }
+
+      const uniqueKey = `${route.rid}:${route.direction}`;
+      if (seen.has(uniqueKey)) {
+        continue;
+      }
+      seen.add(uniqueKey);
+
+      candidates.push({
+        route: route.route_name,
+        rid: route.rid,
+        sid: matchedSid,
+        direction: this.getRouteDisplayDirection(route.route_name, route.rid, route.direction),
+        time_text: BusStatus.NOT_DEPARTED,
+        raw_time: CONFIG.TIME_NOT_DEPARTED,
+      });
+    }
+
+    candidates.sort((a, b) => compareArrivals(a, b));
+    this.staticStopRoutesCache.set(cacheKey, candidates);
+    return candidates.map(item => ({ ...item }));
+  }
+
   private async fetchRealtimeBySlid(slid: string, repSid: string): Promise<any[]> {
+    if (this.shouldUseStaticStopRouteLookup()) {
+      const staticRoutes = this.getStaticRealtimeRoutesForStop(repSid);
+      if (staticRoutes.length > 0) {
+        return staticRoutes;
+      }
+    }
+
     const urlHtml = `${CONFIG.BASE_URL}/stoplocation.jsp?slid=${slid}`;
     const urlJson = `${CONFIG.BASE_URL}/StopLocationDyna?stoplocationid=${slid}`;
 
@@ -1692,21 +1991,23 @@ export class BusPlannerService {
     }
 
     // 5. Sort & cache.
-    finalBuses.sort((a, b) => compareArrivals(a, b));
+    const hydratedBuses = await this.hydrateBusesFromRouteStops(finalBuses);
+    hydratedBuses.sort((a, b) => compareArrivals(a, b));
     
     // Cache without dynamic time
-    AsyncStorage.setItem(cacheKey, JSON.stringify(finalBuses)).catch(() => {});
+    AsyncStorage.setItem(cacheKey, JSON.stringify(hydratedBuses)).catch(() => {});
 
-    return finalBuses;
+    return hydratedBuses;
   }
 
-  public async getArrivalsBySlid(slid: string, stopName: string): Promise<any[]> {
+  public async getArrivalsBySlid(slid: string, repSid: string): Promise<any[]> {
     console.log(`[BusPlanner] Using direct SLID: ${slid}`);
 
-    const buses = await this.fetchRealtimeBySlidCached(slid, stopName);
+    const buses = await this.fetchRealtimeBySlidCached(slid, repSid);
+    const hydratedBuses = await this.hydrateRealtimeBusesFromRouteStops(buses);
 
     // Sort with the shared arrival comparator so urgent arrivals stay first.
-    return buses.sort((a, b) => compareArrivals(a, b));
+    return hydratedBuses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async getStopArrivals(stopName: string): Promise<any[]> {
@@ -1742,7 +2043,8 @@ export class BusPlannerService {
 
     // 5. Flatten and sort the final realtime bus list.
     const allBuses = nestedResults.flat();
-    return allBuses.sort((a, b) => compareArrivals(a, b));
+    const hydratedBuses = await this.hydrateRealtimeBusesFromRouteStops(allBuses);
+    return hydratedBuses.sort((a, b) => compareArrivals(a, b));
   }
 
   public async updateCachedBuses(cachedBuses: BusInfo[]): Promise<BusInfo[]> {
@@ -1776,7 +2078,7 @@ export class BusPlannerService {
         });
     });
 
-    const result = updatedArrays.flat();
+    const result = await this.hydrateBusesFromRouteStops(updatedArrays.flat());
     result.sort((a, b) => compareArrivals(a, b));
     return result;
   }

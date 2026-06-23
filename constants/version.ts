@@ -1,5 +1,5 @@
 export const VERSION_METADATA = {
   "appVersion": "1.0.0",
-  "buildId": "2026-05-27T05:37:31.897Z",
-  "generatedAt": "2026-05-27T05:37:31.897Z"
+  "buildId": "2026-06-23T15:56:40.624Z",
+  "generatedAt": "2026-06-23T15:56:40.624Z"
 } as const;
