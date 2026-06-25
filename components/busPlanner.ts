@@ -113,6 +113,7 @@ interface CachedTaipeiRouteStopMapping {
 const CONFIG = {
   // Legacy Taipei e-bus proxy endpoints used for the MQS fallback path.
   BASE_URL: "https://api.codetabs.com/v1/proxy?quest=https://pda5284.gov.taipei/MQS",
+  ROUTE_DYNA_WEB_PROXY_PATH: '/api/route-dyna',
   TAIPEI_ESTIMATE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetEstimateTime.gz',
   TAIPEI_ROUTE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz',
   TAIPEI_STOP_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetStop.gz',
@@ -558,7 +559,12 @@ export class BusPlannerService {
       return existingRequest;
     }
 
-    const url = `${CONFIG.BASE_URL}/RouteDyna?routeid=${encodeURIComponent(cacheKey)}`;
+    const directUrl = `${CONFIG.BASE_URL}/RouteDyna?routeid=${encodeURIComponent(cacheKey)}`;
+    const url =
+      Platform.OS === 'web'
+        ? `${CONFIG.ROUTE_DYNA_WEB_PROXY_PATH}?routeid=${encodeURIComponent(cacheKey)}`
+        : directUrl;
+
     const request = this.fetchWithTimeout(url)
       .then(async response => {
         if (!response.ok) {
