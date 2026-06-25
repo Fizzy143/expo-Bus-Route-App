@@ -7,6 +7,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as cheerio from 'cheerio';
 import { ungzip } from 'pako';
+import { Platform } from 'react-native';
 
 // Local static datasets are bundled with the app so route topology can be
 // resolved without fetching extra files at runtime.
@@ -116,6 +117,7 @@ const CONFIG = {
   TAIPEI_ROUTE_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz',
   TAIPEI_STOP_URL: 'https://tcgbusfs.blob.core.windows.net/blobbus/GetStop.gz',
   NEW_TAIPEI_ESTIMATE_URL: 'https://data.ntpc.gov.tw/api/datasets/07f7ccb3-ed00-43c4-966d-08e9dab24e95/json',
+  NEW_TAIPEI_ESTIMATE_WEB_PROXY_PATH: '/api/new-taipei-estimates',
   USER_AGENT: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
   TIMEOUT_MS: 15000,
   ROUTE_DETAIL_FALLBACK_TIMEOUT_MS: 7000,
@@ -493,7 +495,7 @@ export class BusPlannerService {
   }
 
   private async fetchNewTaipeiEstimateDataset(routeId: string | number): Promise<TaipeiEstimateRow[]> {
-    if (typeof window !== 'undefined') {
+    if (!this.isWebEstimateSourceAvailable()) {
       return [];
     }
 
@@ -510,7 +512,12 @@ export class BusPlannerService {
       return existingRequest;
     }
 
-    const url = `${CONFIG.NEW_TAIPEI_ESTIMATE_URL}?routeid=${encodeURIComponent(cacheKey)}`;
+    const directUrl = `${CONFIG.NEW_TAIPEI_ESTIMATE_URL}?routeid=${encodeURIComponent(cacheKey)}`;
+    const url =
+      Platform.OS === 'web'
+        ? `${CONFIG.NEW_TAIPEI_ESTIMATE_WEB_PROXY_PATH}?routeid=${encodeURIComponent(cacheKey)}`
+        : directUrl;
+
     const request = this.fetchWithTimeout(url)
       .then(async response => {
         if (!response.ok) {
