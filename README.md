@@ -180,6 +180,8 @@ npm run build:web
 
 編譯後的文件位於 `dist/` 目錄。
 
+> **注意（本地即時資料）**：即時到站資料在 Web 端是透過 `api/` 下的 Vercel serverless 代理取得（`/api/new-taipei-estimates`、`/api/route-dyna`）。`expo start --web` 只跑 Metro bundle，不會執行這些函式，因此本地會拿不到即時資料（新北路線如 707 會顯示「未發車／暫無資料」）。要在本地測即時資料，請改用 `vercel dev`，或直接測線上部署。純 UI 開發用 `expo start --web` 即可。
+
 ### 構建與部署
 
 **編譯:**
