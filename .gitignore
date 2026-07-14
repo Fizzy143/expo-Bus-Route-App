@@ -43,6 +43,9 @@ AppData/
 # typescript
 *.tsbuildinfo
 
+# working-session planning docs (local scratch, not tracked)
+docs/superpowers/
+
 app-example
 
 # generated native folders
