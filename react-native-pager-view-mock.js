@@ -13,12 +13,25 @@ const PagerView = React.forwardRef(({
   const scrollViewRef = React.useRef(null);
   const [currentPage, setCurrentPage] = React.useState(initialPage);
 
-  // Expose setPage method like native PagerView
+  const scrollToPage = React.useCallback((page, animated) => {
+    const screenWidth = Dimensions.get('window').width;
+    scrollViewRef.current?.scrollTo({ x: page * screenWidth, animated });
+  }, []);
+
+  // Land on the requested initial page before the first paint so the pager
+  // never visibly starts at page 0 and then slides to a non-zero initialPage.
+  React.useLayoutEffect(() => {
+    if (initialPage > 0) {
+      scrollToPage(initialPage, false);
+    }
+    // Mount-only: later navigation goes through setPage / user scrolling.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Expose setPage/setPageWithoutAnimation like native PagerView
   React.useImperativeHandle(ref, () => ({
-    setPage: (page) => {
-      const screenWidth = Dimensions.get('window').width;
-      scrollViewRef.current?.scrollTo({ x: page * screenWidth, animated: true });
-    },
+    setPage: (page) => scrollToPage(page, true),
+    setPageWithoutAnimation: (page) => scrollToPage(page, false),
   }));
 
   const handleScroll = (event) => {

@@ -157,6 +157,7 @@ export default function BusRouteDetailScreen() {
   const pendingCenterDirectionRef = useRef<number | null>(null);
   const pendingPagerDirectionIndexRef = useRef<number | null>(null);
   const hasAutoCenteredInitialRef = useRef(false);
+  const hasAppliedPreferredDirectionRef = useRef(false);
 
   const routeName = useMemo(() => {
     if (Array.isArray(params.routeName)) {
@@ -297,6 +298,35 @@ export default function BusRouteDetailScreen() {
     setSelectedDirection(index);
   };
 
+  const getDirectionKeyAtIndex = useCallback(
+    (index: number): number | undefined => directionData[index]?.direction,
+    [directionData]
+  );
+
+  const queueCenterDirectionByIndex = useCallback(
+    (index: number) => {
+      const directionKey = getDirectionKeyAtIndex(index);
+      if (directionKey === undefined) {
+        return;
+      }
+
+      queueCenterDirection(directionKey);
+    },
+    [getDirectionKeyAtIndex, queueCenterDirection]
+  );
+
+  const centerNearestStopByIndex = useCallback(
+    (index: number) => {
+      const directionKey = getDirectionKeyAtIndex(index);
+      if (directionKey === undefined) {
+        return;
+      }
+
+      centerNearestStop(directionKey);
+    },
+    [centerNearestStop, getDirectionKeyAtIndex]
+  );
+
   const applyRealtimeDirection = (
     realtimeDirection: RouteDirectionDetails,
     preservePrevious: boolean
@@ -389,35 +419,23 @@ export default function BusRouteDetailScreen() {
           return -1;
         })();
 
-        const orderedDirections =
-          preferredIndex > 0
-            ? [
-                baseDetails.directions[preferredIndex],
-                ...baseDetails.directions.filter((_, index) => index !== preferredIndex),
-              ]
-            : baseDetails.directions;
-        const normalizedBaseDetails =
-          orderedDirections === baseDetails.directions
-            ? baseDetails
-            : { ...baseDetails, directions: orderedDirections };
-
-        setRouteDetails(normalizedBaseDetails);
-        setDirectionData(prev => (prev.length > 0 ? prev : normalizedBaseDetails.directions));
+        setRouteDetails(baseDetails);
+        setDirectionData(prev => (prev.length > 0 ? prev : baseDetails.directions));
         setLoading(false);
 
-        if (preferredIndex >= 0) {
-          selectedDirectionRef.current = 0;
-          setSelectedDirection(0);
-          pendingPagerDirectionIndexRef.current = 0;
-          queueCenterDirection(normalizedBaseDetails.directions[0].direction);
+        if (preferredIndex >= 0 && !hasAppliedPreferredDirectionRef.current) {
+          selectedDirectionRef.current = preferredIndex;
+          setSelectedDirection(preferredIndex);
+          pendingPagerDirectionIndexRef.current = preferredIndex;
+          queueCenterDirection(baseDetails.directions[preferredIndex].direction);
+          hasAppliedPreferredDirectionRef.current = true;
         }
 
         const activeIndex = Math.min(
-          selectedDirectionRef.current,
-          normalizedBaseDetails.directions.length - 1
+          Math.max(selectedDirectionRef.current, 0),
+          baseDetails.directions.length - 1
         );
-        const activeDirection =
-          normalizedBaseDetails.directions[activeIndex] || normalizedBaseDetails.directions[0];
+        const activeDirection = baseDetails.directions[activeIndex] || baseDetails.directions[0];
         await loadSingleDirection(activeDirection, isRefresh);
       } catch (error) {
         console.error('Failed to load route details:', error);
@@ -466,6 +484,7 @@ export default function BusRouteDetailScreen() {
     pendingCenterDirectionRef.current = null;
     pendingPagerDirectionIndexRef.current = null;
     hasAutoCenteredInitialRef.current = false;
+    hasAppliedPreferredDirectionRef.current = false;
     setLastUpdateAt(null);
     loadRouteDetails();
 
@@ -556,16 +575,25 @@ export default function BusRouteDetailScreen() {
       return;
     }
 
-    if (!hasAutoCenteredInitialRef.current && nearestStopIndexByDirection[selectedDirection] !== undefined) {
-      queueCenterDirection(selectedDirection);
+    const activeDirectionKey = getDirectionKeyAtIndex(selectedDirection);
+    if (activeDirectionKey === undefined) {
+      return;
+    }
+
+    if (
+      !hasAutoCenteredInitialRef.current &&
+      nearestStopIndexByDirection[activeDirectionKey] !== undefined
+    ) {
+      queueCenterDirection(activeDirectionKey);
       hasAutoCenteredInitialRef.current = true;
     }
 
-    if (pendingCenterDirectionRef.current === selectedDirection) {
-      centerNearestStop(selectedDirection);
+    if (pendingCenterDirectionRef.current === activeDirectionKey) {
+      centerNearestStop(activeDirectionKey);
     }
   }, [
     centerNearestStop,
+    getDirectionKeyAtIndex,
     locationReady,
     nearestStopIndexByDirection,
     queueCenterDirection,
@@ -595,14 +623,14 @@ export default function BusRouteDetailScreen() {
 
   const handleDirectionChange = (index: number) => {
     updateSelectedDirection(index);
-    queueCenterDirection(index);
+    queueCenterDirectionByIndex(index);
     void ensureDirectionLoaded(index);
   };
 
   const handleDirectionTabPress = (index: number) => {
     if (index === selectedDirection) {
-      queueCenterDirection(index);
-      centerNearestStop(index);
+      queueCenterDirectionByIndex(index);
+      centerNearestStopByIndex(index);
       return;
     }
 
@@ -748,7 +776,7 @@ export default function BusRouteDetailScreen() {
             <PagerView
               ref={pagerRef}
               style={styles.pager}
-              initialPage={0}
+              initialPage={selectedDirection}
               onPageSelected={event => handleDirectionChange(event.nativeEvent.position)}
             >
               {directionData.map(direction => (
