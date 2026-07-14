@@ -60,22 +60,6 @@ export default function Map() {
     return (
       <View style={styles.container}>
         <View style={styles.messageContainer}>
-          <Text style={styles.title}>📍 需要位置權限</Text>
-          <Text style={styles.message}>
-            請在系統設定中允許定位，以查看附近站牌
-          </Text>
-          <TouchableOpacity onPress={onCancel} style={styles.backButton} activeOpacity={0.7}>
-            <Text style={styles.backButtonText}>返回</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
-  }
-
-  if (loading) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.messageContainer}>
           <ActivityIndicator size="large" color="#6F73F8" />
           <Text style={styles.hint}>取得位置中…</Text>
         </View>
