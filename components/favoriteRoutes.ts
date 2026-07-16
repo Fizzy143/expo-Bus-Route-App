@@ -16,7 +16,7 @@ export interface FavoriteRoute {
   useCount: number;              // 使用次數
   pinned: boolean;               // 是否置頂
   cachedRouteNames?: string[];   // 快取的可用公車路線（用於快速顯示）
-  cachedRouteInfo?: Array<{routeName: string, rid: string, direction: string}>; // 完整路線資訊（含 RID 和方向）
+  cachedRouteInfo?: {routeName: string, rid: string, direction: string}[]; // 完整路線資訊（含 RID 和方向）
   cacheUpdatedAt?: number;       // 快取更新時間
 }
 
@@ -429,7 +429,7 @@ export class FavoriteRoutesService {
   async updateRouteCacheInfo(
     fromStop: string,
     toStop: string,
-    routeInfo: Array<{routeName: string, rid: string, direction: string}>
+    routeInfo: {routeName: string, rid: string, direction: string}[]
   ): Promise<boolean> {
     try {
       const data = await this.loadData();

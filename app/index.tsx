@@ -122,7 +122,7 @@ export default function StopScreen() {
       duration: 300,
       useNativeDriver: false,
     }).start();
-  }, [sidebarVisible]);
+  }, [sidebarVisible, sidebarAnimation]);
 
   const sidebarWidth = sidebarAnimation.interpolate({
     inputRange: [0, 1],
@@ -233,6 +233,7 @@ export default function StopScreen() {
       await saveRecentStop('捷運公館站');
     };
     initService();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 僅掛載時初始化站牌（URL name→最近→定位→預設）；加入 name 會在參數變動時重置站牌/重新定位
   }, []);
 
   // 當 serviceReady 變為 true 時，立即載入常用路線
@@ -240,6 +241,7 @@ export default function StopScreen() {
     if (serviceReady) {
       loadFavoriteRoutes();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在 serviceReady 變 true 時載入；loadFavoriteRoutes 唯一 reactive 依賴就是 serviceReady（已列）
   }, [serviceReady]);
 
   // 當頁面重新聚焦時，重新載入常用路線
@@ -248,6 +250,7 @@ export default function StopScreen() {
       if (serviceReady) {
         loadFavoriteRoutes();
       }
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- 聚焦時重載常用路線；loadFavoriteRoutes 唯一 reactive 依賴就是 serviceReady（已列）
     }, [serviceReady])
   );
 
@@ -261,7 +264,7 @@ export default function StopScreen() {
       scrollRouteButtonToCenter(selectedRouteIndex);
     }
     prevDisplayModeRef.current = displayMode;
-  }, [displayMode]);
+  }, [displayMode, favoriteRoutes.length, selectedRouteIndex]);
 
   useEffect(() => {
     selectedRouteIndexRef.current = selectedRouteIndex;
@@ -294,6 +297,7 @@ export default function StopScreen() {
       if (intervalRef.current) clearInterval(intervalRef.current);
       if (favoriteIntervalRef.current) clearInterval(favoriteIntervalRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- interval 已顯式帶入當前 selectedStop（已列依賴）；加入 fetchBusData 會在每次 render / 手動刷新（refreshing 變動）時重設 10 秒計時器
   }, [selectedStop, serviceReady]);
 
   // 抓資料核心邏輯 (使用新 API)

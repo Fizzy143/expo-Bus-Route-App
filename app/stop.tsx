@@ -1,5 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -55,7 +55,7 @@ export default function StopDetailScreen() {
     setResolvedStopName(stopName || DEFAULT_STOP_NAME);
   }, [stopName]);
 
-  const fetchBusData = async (isAutoRefresh = false) => {
+  const fetchBusData = useCallback(async (isAutoRefresh = false) => {
     try {
       if (!serviceReady) return;
 
@@ -255,7 +255,7 @@ export default function StopDetailScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [resolvedStopName, serviceReady]);
 
   useEffect(() => {
     if (serviceReady) {
@@ -268,7 +268,7 @@ export default function StopDetailScreen() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [resolvedStopName, serviceReady]);
+  }, [resolvedStopName, serviceReady, fetchBusData]);
 
   const onRefresh = () => {
     const now = Date.now();

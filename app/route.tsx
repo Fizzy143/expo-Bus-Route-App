@@ -1,5 +1,5 @@
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -75,7 +75,7 @@ export default function RouteScreen() {
   const [isFavorite, setIsFavorite] = useState<boolean>(false);
   
   const debounceRef = useRef<any>(null);
-  const allStops = Object.keys(stopData.by_name);
+  const allStops = useMemo(() => Object.keys(stopData.by_name), []);
 
   const runRoutePlan = useCallback(async (startStop: string, endStop: string) => {
     if (!startStop || !endStop) {
@@ -186,7 +186,7 @@ export default function RouteScreen() {
         allStops.filter(s => s.toLowerCase().includes(q)).slice(0, 20)
       );
     }, 250);
-  }, [searchQuery]);
+  }, [searchQuery, allStops]);
 
   useEffect(() => {
     let cancelled = false;
@@ -225,7 +225,7 @@ export default function RouteScreen() {
     const t = setTimeout(() => {
       try {
         searchInputRef.current?.focus?.();
-      } catch (e) {
+      } catch {
         // ignore
       }
     }, 120);
@@ -325,6 +325,10 @@ export default function RouteScreen() {
     }
   };
 
+  // 讓 interval 永遠呼叫到最新的 updateRouteInfo，deps 維持原始值以保住固定 30 秒節奏
+  const updateRouteInfoRef = useRef(updateRouteInfo);
+  updateRouteInfoRef.current = updateRouteInfo;
+
   // 自動更新路線資訊（每30秒）
   useEffect(() => {
     if (hasSearched && routeInfo.length > 0 && fromStop && toStop) {
@@ -334,9 +338,9 @@ export default function RouteScreen() {
         clearInterval(updateIntervalRef.current);
       }
       // 立即更新一次
-      updateRouteInfo();
+      updateRouteInfoRef.current();
       // 設定新的定時器
-      updateIntervalRef.current = setInterval(updateRouteInfo, 30000);
+      updateIntervalRef.current = setInterval(() => updateRouteInfoRef.current(), 30000);
     } else {
       if (updateIntervalRef.current) {
         console.log('停止路線自動更新');
@@ -352,12 +356,20 @@ export default function RouteScreen() {
     };
   }, [hasSearched, routeInfo.length, fromStop, toStop]);
 
+  // 檢查是否已加入常用
+  const checkFavoriteStatus = useCallback(async () => {
+    if (fromStop && toStop) {
+      const isFav = await favoriteRoutesService.isFavorite(fromStop, toStop);
+      setIsFavorite(isFav);
+    }
+  }, [fromStop, toStop]);
+
   // 檢查常用路線狀態
   useEffect(() => {
     if (hasSearched && fromStop && toStop) {
       checkFavoriteStatus();
     }
-  }, [hasSearched, fromStop, toStop]);
+  }, [hasSearched, fromStop, toStop, checkFavoriteStatus]);
 
   // 當頁面獲得焦點時重新檢查常用狀態（例如從首頁返回）
   useFocusEffect(
@@ -365,7 +377,7 @@ export default function RouteScreen() {
       if (hasSearched && fromStop && toStop) {
         checkFavoriteStatus();
       }
-    }, [hasSearched, fromStop, toStop])
+    }, [hasSearched, fromStop, toStop, checkFavoriteStatus])
   );
 
   // 選擇站牌
@@ -448,14 +460,6 @@ export default function RouteScreen() {
     setHasSearched(false);
     setSelectedRouteIndex(0);
     setIsFavorite(false);
-  };
-
-  // 檢查是否已加入常用
-  const checkFavoriteStatus = async () => {
-    if (fromStop && toStop) {
-      const isFav = await favoriteRoutesService.isFavorite(fromStop, toStop);
-      setIsFavorite(isFav);
-    }
   };
 
   // 切換常用路線

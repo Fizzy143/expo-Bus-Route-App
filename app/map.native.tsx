@@ -248,6 +248,7 @@ export default function MapNative() {
         clearInterval(routeUpdateIntervalRef.current);
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 刻意每 30 秒重訂閱、只依 showRoute + routeInfo.length；updateRouteInfo 以固定參數重查，加入它會重設/重複計時器
   }, [showRoute, routeInfo.length]);
 
   // 清理函數
