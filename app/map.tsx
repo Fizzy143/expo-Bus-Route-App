@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
     ActivityIndicator,
     FlatList,
@@ -10,39 +10,22 @@ import {
 } from 'react-native';
 
 import {
+    calculateNearbyStops,
     formatDistance,
-    getNearbyStopsWithLocation,
-    type StopEntry,
 } from '../components/locationService';
+import { useUserLocation } from '../components/LocationProvider';
 
 const DEFAULT_RADIUS_METERS = 800;
 
 export default function Map() {
   const router = useRouter();
-  const [nearbyStops, setNearbyStops] = useState<StopEntry[]>([]);
-  const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
   const [radiusMeters] = useState<number>(DEFAULT_RADIUS_METERS);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const result = await getNearbyStopsWithLocation(radiusMeters, 50);
-        
-        if (result.success) {
-          setNearbyStops(result.stops);
-          setPermissionStatus('granted');
-        } else {
-          setPermissionStatus(result.error === '位置權限被拒絕' ? 'denied' : 'error');
-        }
-      } catch (e) {
-        console.warn('Location error', e);
-        setPermissionStatus('error');
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [radiusMeters]);
+  const { location, status, permissionStatus } = useUserLocation();
+  const nearbyStops = React.useMemo(
+    () => location ? calculateNearbyStops(location, radiusMeters, 50) : [],
+    [location, radiusMeters]
+  );
+  const loading = !location && (status === 'requesting' || status === 'paused');
 
   const onCancel = () => {
     if (router.canGoBack()) {

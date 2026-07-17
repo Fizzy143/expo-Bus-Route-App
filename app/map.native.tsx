@@ -1,4 +1,3 @@
-import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Modal, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
@@ -6,27 +5,21 @@ import MapView, { Callout, Marker, Polyline, PROVIDER_DEFAULT, PROVIDER_GOOGLE }
 
 import type { BusInfo } from '../components/busPlanner';
 import { BusPlannerService } from '../components/busPlanner';
-import stopsRaw from '../databases/stops.json';
+import { useUserLocation } from '../components/LocationProvider';
+import {
+  calculateNearbyPhysicalStops,
+  type StopEntry,
+} from '../components/locationService';
+import {
+  regionFromLocation,
+  shouldInitializeRegion,
+  type MapRegion,
+} from '../components/mapLocation';
 
-type StopEntry = { name: string; sid: string; lat: number; lon: number; distance?: number };
 const DEFAULT_RADIUS_METERS = 800;
 
-function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const toRad = (v: number) => (v * Math.PI) / 180;
-  const R = 6371000;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 export default function MapNative() {
-  const [region, setRegion] = useState<any | null>(null);
-  const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null);
-  const [permissionStatus, setPermissionStatus] = useState<string | null>(null);
+  const [region, setRegion] = useState<MapRegion | null>(null);
   const [radiusMeters] = useState<number>(DEFAULT_RADIUS_METERS);
   const [showListModal, setShowListModal] = useState<boolean>(false);
   const [currentZoom, setCurrentZoom] = useState<number>(0.012); // 追蹤當前縮放級別
@@ -41,40 +34,19 @@ export default function MapNative() {
   const animationTimeoutRef = useRef<any>(null);
   const routeUpdateIntervalRef = useRef<any>(null); // 路線更新定時器
   const [isUpdatingRoute, setIsUpdatingRoute] = useState<boolean>(false); // 是否正在更新路線
+  const { location: userLocation, status, permissionStatus } = useUserLocation();
 
   const getRouteDisplayDirection = (route: BusInfo) =>
     plannerRef.current.getRouteDisplayDirection(route.routeName, route.rid, route.directionText) ||
     route.directionText ||
     '';
 
-  const stopsList: StopEntry[] = useMemo(() => {
-    const out: StopEntry[] = [];
-    const raw: any = stopsRaw;
-    Object.entries(raw).forEach(([name, obj]: any) => {
-      if (!obj || typeof obj !== 'object') return;
-      Object.entries(obj).forEach(([sid, coords]: any) => {
-        const lat = Number(coords.lat);
-        const lon = Number(coords.lon);
-        if (!Number.isNaN(lat) && !Number.isNaN(lon)) out.push({ name, sid, lat, lon });
-      });
-    });
-    return out;
-  }, []);
-
-  const nearbyStops = useMemo(() => {
-    if (!userLocation) return [] as StopEntry[];
-    
-    // 計算所有站牌的距離
-    const stopsWithDistance = stopsList
-      .map((s) => ({
-        ...s,
-        distance: haversineMeters(userLocation.lat, userLocation.lon, s.lat, s.lon)
-      }))
-      .filter((x) => x.distance <= radiusMeters)
-      .sort((a, b) => a.distance - b.distance);
-    
-    return stopsWithDistance.slice(0, 200);
-  }, [stopsList, userLocation, radiusMeters]);
+  const nearbyStops = useMemo(
+    () => userLocation
+      ? calculateNearbyPhysicalStops(userLocation, radiusMeters, 200)
+      : [],
+    [radiusMeters, userLocation]
+  );
 
   // 根據縮放級別過濾要顯示的站牌
   const visibleStops = useMemo(() => {
@@ -158,22 +130,10 @@ export default function MapNative() {
   }, [routeInfo]); // 移除 showRoute 依賴，只依賴 routeInfo
 
   useEffect(() => {
-    (async () => {
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        setPermissionStatus(status);
-        if (status !== 'granted') return;
-
-        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        const lat = loc.coords.latitude;
-        const lon = loc.coords.longitude;
-        setUserLocation({ lat, lon });
-        setRegion({ latitude: lat, longitude: lon, latitudeDelta: 0.012, longitudeDelta: 0.012 });
-      } catch (e) {
-        console.warn('Location error', e);
-      }
-    })();
-  }, []);
+    if (shouldInitializeRegion(region, userLocation)) {
+      setRegion(regionFromLocation(userLocation!));
+    }
+  }, [region, userLocation]);
 
   // 初始化 BusPlannerService 並查詢測試路線
   useEffect(() => {
@@ -349,29 +309,19 @@ export default function MapNative() {
     }
   };
 
-  const recenter = async () => {
-    try {
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const lat = loc.coords.latitude;
-      const lon = loc.coords.longitude;
-      setUserLocation({ lat, lon });
+  const recenter = () => {
+    if (!userLocation) return;
 
-      const targetRegion = {
-        latitude: lat,
-        longitude: lon,
-        latitudeDelta: region?.latitudeDelta ?? 0.012,
-        longitudeDelta: region?.longitudeDelta ?? 0.012,
-      };
+    const targetRegion = regionFromLocation(
+      userLocation,
+      region?.latitudeDelta ?? 0.012,
+      region?.longitudeDelta ?? 0.012
+    );
 
-      // 如果 MapView 有 animateToRegion，使用動畫移動；否則回退為直接 setRegion
-      if (mapRef.current && typeof mapRef.current.animateToRegion === 'function') {
-        // 500ms 平滑過渡
-        mapRef.current.animateToRegion(targetRegion, 500);
-      } else {
-        setRegion((r: any) => ({ ...(r || {}), ...targetRegion }));
-      }
-    } catch (e) {
-      console.warn('Recenter failed', e);
+    if (mapRef.current?.animateToRegion) {
+      mapRef.current.animateToRegion(targetRegion, 500);
+    } else {
+      setRegion(targetRegion);
     }
   };
 
@@ -397,10 +347,19 @@ export default function MapNative() {
   }
 
   if (!region) {
+    const isLoading = status === 'requesting' || status === 'paused';
+
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" />
-        <Text style={styles.hint}>取得位置中…</Text>
+        {isLoading ? <ActivityIndicator size="large" /> : null}
+        <Text style={styles.hint}>
+          {isLoading ? '取得位置中…' : '目前無法取得位置。'}
+        </Text>
+        {!isLoading ? (
+          <TouchableOpacity style={styles.button} onPress={back}>
+            <Text style={styles.buttonText}>返回</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
     );
   }
@@ -415,14 +374,21 @@ export default function MapNative() {
         onRegionChangeComplete={(newRegion) => {
           setCurrentZoom(newRegion.latitudeDelta);
         }}
-        showsUserLocation={true}
-        showsMyLocationButton={true}
         mapType={Platform.OS === 'ios' ? 'mutedStandard' : 'standard'}
       >
+        {userLocation ? (
+          <Marker
+            testID="shared-user-location-marker"
+            coordinate={{ latitude: userLocation.lat, longitude: userLocation.lon }}
+            pinColor="#6F73F8"
+            title="目前位置"
+          />
+        ) : null}
+
         {/* 只在未顯示路線時顯示附近站牌 */}
         {!showRoute && visibleStops.map((s) => (
           <Marker 
-            key={`${s.sid}-${s.lat}-${s.lon}`} 
+            key={`${s.slid}-${s.lat}-${s.lon}`}
             coordinate={{ latitude: s.lat, longitude: s.lon }}
           >
             <Callout onPress={() => navigateToStop(s.name)}>
@@ -659,7 +625,7 @@ export default function MapNative() {
 
           <FlatList
             data={uniqueNearbyStops}
-            keyExtractor={(item, index) => `${item.sid}-${index}`}
+            keyExtractor={(item, index) => `${item.slid}-${index}`}
             renderItem={({ item }) => (
               <TouchableOpacity 
                 style={styles.stopItem}
@@ -668,7 +634,7 @@ export default function MapNative() {
               >
                 <View style={styles.stopInfo}>
                   <Text style={styles.stopName}>{item.name}</Text>
-                  <Text style={styles.stopSid}>站牌 ID: {item.sid}</Text>
+                  <Text style={styles.stopSid}>站牌 ID: {item.slid}</Text>
                 </View>
                 <View style={styles.distanceContainer}>
                   <Text style={styles.distanceText}>{Math.round(item.distance || 0)}m</Text>

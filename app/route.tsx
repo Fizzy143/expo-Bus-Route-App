@@ -17,10 +17,10 @@ import type { BusInfo } from '../components/busPlanner';
 import { BusPlannerService } from '../components/busPlanner';
 import { favoriteRoutesService } from '../components/favoriteRoutes';
 import {
+  calculateNearbyStops,
   formatDistance,
-  getNearbyStopsWithLocation,
-  type StopEntry,
 } from '../components/locationService';
+import { useUserLocation } from '../components/LocationProvider';
 import WebRouteTransitionView from '../components/WebRouteTransitionView';
 import { beginWebRouteTransition } from '../components/web-route-transition';
 import stopMapRaw from '../databases/stop_id_map.json';
@@ -49,8 +49,6 @@ export default function RouteScreen() {
   const [searchMode, setSearchMode] = useState<'from' | 'to' | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
-  const [nearbyStops, setNearbyStops] = useState<StopEntry[]>([]);
-  const [loadingNearbyStops, setLoadingNearbyStops] = useState(false);
   
   // 路線結果狀態
   const [routeInfo, setRouteInfo] = useState<BusInfo[]>([]);
@@ -76,6 +74,12 @@ export default function RouteScreen() {
   
   const debounceRef = useRef<any>(null);
   const allStops = useMemo(() => Object.keys(stopData.by_name), []);
+  const { location, status: locationStatus } = useUserLocation();
+  const nearbyStops = useMemo(
+    () => location ? calculateNearbyStops(location, 800, 10) : [],
+    [location]
+  );
+  const loadingNearbyStops = !location && locationStatus === 'requesting';
 
   const runRoutePlan = useCallback(async (startStop: string, endStop: string) => {
     if (!startStop || !endStop) {
@@ -187,32 +191,6 @@ export default function RouteScreen() {
       );
     }, 250);
   }, [searchQuery, allStops]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadNearbyStops = async () => {
-      try {
-        setLoadingNearbyStops(true);
-        const result = await getNearbyStopsWithLocation(800, 10);
-        if (!cancelled && result.success) {
-          setNearbyStops(result.stops);
-        }
-      } catch (error) {
-        console.error('載入附近站牌失敗:', error);
-      } finally {
-        if (!cancelled) {
-          setLoadingNearbyStops(false);
-        }
-      }
-    };
-
-    void loadNearbyStops();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // 在 PWA (standalone) 模式下，autoFocus 可能不會觸發鍵盤，提供 fallback focus
   useEffect(() => {

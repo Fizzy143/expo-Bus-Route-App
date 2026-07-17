@@ -1,5 +1,4 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as Location from 'expo-location';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -20,9 +19,16 @@ import {
   RouteDirectionDetails,
   RouteStopArrival,
 } from '../components/busPlanner';
-import { haversineMeters, UserLocation } from '../components/locationService';
+import { useUserLocation } from '../components/LocationProvider';
+import {
+  initialRouteFollowState,
+  pauseRouteFollow,
+  resumeRouteFollow,
+  routeFollowNearestChanged,
+} from '../components/routeStopFollow';
 import WebRouteTransitionView from '../components/WebRouteTransitionView';
 import { beginWebRouteTransition } from '../components/web-route-transition';
+import { useStableNearestStop } from '../hooks/useStableNearestStop';
 
 const DEFAULT_ROUTE_NAME = '606';
 const AUTO_REFRESH_MS = 10000;
@@ -156,8 +162,11 @@ export default function BusRouteDetailScreen() {
   const directionListRefs = useRef<Record<number, FlatList<RouteStopArrival> | null>>({});
   const pendingCenterDirectionRef = useRef<number | null>(null);
   const pendingPagerDirectionIndexRef = useRef<number | null>(null);
-  const hasAutoCenteredInitialRef = useRef(false);
   const hasAppliedPreferredDirectionRef = useRef(false);
+  const { location, status: locationStatus, setTrackingMode } = useUserLocation();
+  const followStateRef = useRef(initialRouteFollowState);
+  const previousLocationStatusRef = useRef(locationStatus);
+  const resumeFollowingRef = useRef<() => void>(() => undefined);
 
   const routeName = useMemo(() => {
     if (Array.isArray(params.routeName)) {
@@ -191,10 +200,30 @@ export default function BusRouteDetailScreen() {
   const [errorText, setErrorText] = useState('');
   const [lastUpdateAt, setLastUpdateAt] = useState<number | null>(null);
   const [relativeNow, setRelativeNow] = useState(() => Date.now());
-  const [userLocation, setUserLocation] = useState<UserLocation | null>(null);
-  const [locationReady, setLocationReady] = useState(false);
-  const [nearestStopIndexByDirection, setNearestStopIndexByDirection] = useState<Record<number, number>>(
-    {}
+  const activeDirection = directionData[selectedDirection] ?? null;
+  const activeCandidates = useMemo(() => {
+    if (!activeDirection) return [];
+
+    return activeDirection.stops.flatMap((stop, index) => {
+      const geo = plannerRef.current.getGeoBySid(stop.sid);
+      return geo
+        ? [{ key: stop.sid, name: stop.name, index, lat: geo.lat, lon: geo.lon }]
+        : [];
+    });
+  }, [activeDirection]);
+  const activeScopeKey = activeDirection
+    ? `${activeDirection.rid}:${activeDirection.direction}`
+    : 'no-direction';
+  const stableNearestStop = useStableNearestStop(
+    location,
+    activeCandidates,
+    activeScopeKey
+  );
+  const nearestStopIndexByDirection = useMemo<Record<number, number>>(
+    () => activeDirection && stableNearestStop
+      ? { [activeDirection.direction]: stableNearestStop.index }
+      : {},
+    [activeDirection, stableNearestStop]
   );
 
   const syncPagerToIndex = useCallback((index: number) => {
@@ -220,19 +249,11 @@ export default function BusRouteDetailScreen() {
   }, []);
 
   const queueCenterDirection = useCallback((direction: number) => {
-    if (Platform.OS !== 'web') {
-      return;
-    }
-
     pendingCenterDirectionRef.current = direction;
   }, []);
 
   const centerNearestStop = useCallback(
     (direction: number, retryCount = 0) => {
-      if (Platform.OS !== 'web') {
-        return;
-      }
-
       const nearestIndex = nearestStopIndexByDirection[direction];
       if (nearestIndex === undefined) {
         return;
@@ -326,6 +347,61 @@ export default function BusRouteDetailScreen() {
     },
     [centerNearestStop, getDirectionKeyAtIndex]
   );
+
+  const resumeFollowing = useCallback(() => {
+    const result = resumeRouteFollow(followStateRef.current);
+    followStateRef.current = result.state;
+    const directionKey = getDirectionKeyAtIndex(selectedDirectionRef.current);
+
+    if (result.shouldScroll && directionKey !== undefined) {
+      queueCenterDirection(directionKey);
+      centerNearestStop(directionKey);
+    }
+  }, [centerNearestStop, getDirectionKeyAtIndex, queueCenterDirection]);
+
+  useFocusEffect(useCallback(() => {
+    setTrackingMode('trip');
+    resumeFollowingRef.current();
+
+    return () => setTrackingMode('standard');
+  }, [setTrackingMode]));
+
+  useEffect(() => {
+    resumeFollowingRef.current = resumeFollowing;
+  }, [resumeFollowing]);
+
+  useEffect(() => {
+    const nearestIndex = stableNearestStop?.index ?? null;
+    const result = routeFollowNearestChanged(followStateRef.current, nearestIndex);
+    followStateRef.current = result.state;
+
+    if (result.shouldScroll && activeDirection) {
+      queueCenterDirection(activeDirection.direction);
+      centerNearestStop(activeDirection.direction);
+    }
+  }, [
+    activeDirection,
+    centerNearestStop,
+    queueCenterDirection,
+    stableNearestStop?.index,
+  ]);
+
+  useEffect(() => {
+    if (
+      locationStatus === 'tracking' &&
+      previousLocationStatusRef.current !== 'tracking'
+    ) {
+      resumeFollowing();
+    }
+    previousLocationStatusRef.current = locationStatus;
+  }, [locationStatus, resumeFollowing]);
+
+  const handleUserListScroll = useCallback(() => {
+    followStateRef.current = pauseRouteFollow(
+      followStateRef.current,
+      stableNearestStop?.index ?? null
+    );
+  }, [stableNearestStop?.index]);
 
   const applyRealtimeDirection = (
     realtimeDirection: RouteDirectionDetails,
@@ -477,13 +553,10 @@ export default function BusRouteDetailScreen() {
     setSelectedDirection(0);
     setRouteDetails(null);
     setDirectionData([]);
-    setUserLocation(null);
-    setLocationReady(false);
-    setNearestStopIndexByDirection({});
+    followStateRef.current = initialRouteFollowState;
     directionListRefs.current = {};
     pendingCenterDirectionRef.current = null;
     pendingPagerDirectionIndexRef.current = null;
-    hasAutoCenteredInitialRef.current = false;
     hasAppliedPreferredDirectionRef.current = false;
     setLastUpdateAt(null);
     loadRouteDetails();
@@ -494,111 +567,6 @@ export default function BusRouteDetailScreen() {
 
     return () => clearInterval(interval);
   }, [loadRouteDetails]);
-
-  useEffect(() => {
-    if (Platform.OS !== 'web') {
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadUserLocation = async () => {
-      try {
-        const permission = await Location.getForegroundPermissionsAsync();
-        if (permission.status !== 'granted') {
-          if (!cancelled) {
-            setLocationReady(true);
-          }
-          return;
-        }
-
-        const location = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-
-        if (!cancelled) {
-          setUserLocation({
-            lat: location.coords.latitude,
-            lon: location.coords.longitude,
-          });
-        }
-      } catch (error) {
-        console.warn('Failed to resolve bus-route location:', error);
-      } finally {
-        if (!cancelled) {
-          setLocationReady(true);
-        }
-      }
-    };
-
-    void loadUserLocation();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [routeName]);
-
-  useEffect(() => {
-    if (Platform.OS !== 'web' || !locationReady || !userLocation || directionData.length === 0) {
-      return;
-    }
-
-    const nextNearest: Record<number, number> = {};
-
-    directionData.forEach(direction => {
-      let nearestIndex = -1;
-      let nearestDistance = Number.POSITIVE_INFINITY;
-
-      direction.stops.forEach((stop, index) => {
-        const geo = plannerRef.current.getGeoBySid(stop.sid);
-        if (!geo) {
-          return;
-        }
-
-        const distance = haversineMeters(userLocation.lat, userLocation.lon, geo.lat, geo.lon);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearestIndex = index;
-        }
-      });
-
-      if (nearestIndex >= 0) {
-        nextNearest[direction.direction] = nearestIndex;
-      }
-    });
-
-    setNearestStopIndexByDirection(nextNearest);
-  }, [directionData, locationReady, userLocation]);
-
-  useEffect(() => {
-    if (Platform.OS !== 'web' || !locationReady) {
-      return;
-    }
-
-    const activeDirectionKey = getDirectionKeyAtIndex(selectedDirection);
-    if (activeDirectionKey === undefined) {
-      return;
-    }
-
-    if (
-      !hasAutoCenteredInitialRef.current &&
-      nearestStopIndexByDirection[activeDirectionKey] !== undefined
-    ) {
-      queueCenterDirection(activeDirectionKey);
-      hasAutoCenteredInitialRef.current = true;
-    }
-
-    if (pendingCenterDirectionRef.current === activeDirectionKey) {
-      centerNearestStop(activeDirectionKey);
-    }
-  }, [
-    centerNearestStop,
-    getDirectionKeyAtIndex,
-    locationReady,
-    nearestStopIndexByDirection,
-    queueCenterDirection,
-    selectedDirection,
-  ]);
 
   useEffect(() => {
     const pendingIndex = pendingPagerDirectionIndexRef.current;
@@ -623,6 +591,7 @@ export default function BusRouteDetailScreen() {
 
   const handleDirectionChange = (index: number) => {
     updateSelectedDirection(index);
+    followStateRef.current = resumeRouteFollow(followStateRef.current).state;
     queueCenterDirectionByIndex(index);
     void ensureDirectionLoaded(index);
   };
@@ -681,10 +650,7 @@ export default function BusRouteDetailScreen() {
   const renderStopItem = (direction: RouteDirectionDetails, item: RouteStopArrival, index: number) => {
     const stopCount = direction.stops.length;
     const isTerminal = index === 0 || index === stopCount - 1;
-    const isNearest =
-      Platform.OS === 'web' &&
-      locationReady &&
-      nearestStopIndexByDirection[direction.direction] === index;
+    const isNearest = nearestStopIndexByDirection[direction.direction] === index;
 
     return (
       <View style={[styles.stopRow, isNearest && styles.stopRowNearest]}>
@@ -798,6 +764,10 @@ export default function BusRouteDetailScreen() {
                       renderStopItem(direction, item, index)
                     }
                     contentContainerStyle={styles.listContent}
+                    onScrollBeginDrag={handleUserListScroll}
+                    {...(Platform.OS === 'web'
+                      ? ({ onWheel: handleUserListScroll } as object)
+                      : {})}
                     getItemLayout={(_, index) => ({
                       index,
                       length: STOP_ROW_HEIGHT,

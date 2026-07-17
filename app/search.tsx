@@ -15,10 +15,10 @@ import {
 // 1. 改為引入包含完整資訊的 stop_id_map.json
 // 請確認檔案名稱與路徑是否正確
 import {
+  calculateNearbyStops,
   formatDistance,
-  getNearbyStopsWithLocation,
-  type StopEntry,
 } from '../components/locationService';
+import { useUserLocation } from '../components/LocationProvider';
 import stopMapRaw from '../databases/stop_id_map.json';
 
 // 2. 定義我們需要的資料結構
@@ -34,37 +34,17 @@ export default function SearchScreen() {
   const router = useRouter();
   const [query, setQuery] = useState('');
   const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [nearbyStops, setNearbyStops] = useState<StopEntry[]>([]);
-  const [loadingLocation, setLoadingLocation] = useState(false);
   const debounceRef = useRef<any>(null);
+  const { location, status: locationStatus } = useUserLocation();
+  const nearbyStops = useMemo(
+    () => location ? calculateNearbyStops(location, 800, 10) : [],
+    [location]
+  );
+  const loadingLocation = !location && locationStatus === 'requesting';
 
   // 3. 取得所有站名
   // 使用 useMemo 優化：只在組件首次載入時執行一次，避免每次打字 render 都重新提取 keys
   const allStops = useMemo(() => Object.keys(stopData.by_name), []);
-
-  // 載入附近站牌
-  const loadNearbyStops = async () => {
-    try {
-      setLoadingLocation(true);
-      const result = await getNearbyStopsWithLocation(800, 10);
-      
-      if (result.success) {
-        setNearbyStops(result.stops);
-        console.log('已載入附近站牌:', result.stops.length, '個');
-      } else {
-        console.log('載入附近站牌失敗:', result.error);
-      }
-    } catch (error) {
-      console.error('載入附近站牌失敗:', error);
-    } finally {
-      setLoadingLocation(false);
-    }
-  };
-
-  // 組件載入時取得附近站牌
-  useEffect(() => {
-    loadNearbyStops();
-  }, []);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);

@@ -1,6 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Location from 'expo-location';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -10,7 +9,6 @@ import {
   FlatList,
   Modal,
   Platform,
-  RefreshControl,
   ScrollView,
   StyleProp,
   StyleSheet,
@@ -24,6 +22,7 @@ import PagerView from 'react-native-pager-view';
 // 假設 BusPlannerService 放在 services 資料夾，請依實際位置調整
 import { BusPlannerService } from '../components/busPlanner';
 import { FavoriteRoute, favoriteRoutesService } from '../components/favoriteRoutes';
+import HomeEmptyState from '../components/HomeEmptyState';
 import InstallPWA from '../components/InstallPWA';
 import NotificationSettings from '../components/NotificationSettings';
 import ServiceWorkerRegister from '../components/ServiceWorkerRegister';
@@ -50,40 +49,39 @@ interface FavoriteRouteCacheInfo {
 
 export default function StopScreen() {
   const router = useRouter();
-  const { name } = useLocalSearchParams<{ name?: string }>();
   const pageTransitionRef = useRef<HTMLElement | null>(null);
   const AUTO_REFRESH_MS = 10000;
 
   // 使用新版 Service
   const plannerRef = useRef(new BusPlannerService());
   const [serviceReady, setServiceReady] = useState(false);
-
-  const [selectedStop, setSelectedStop] = useState<string>(name || '');
-  const [arrivals, setArrivals] = useState<UIArrival[]>([]);
-  const [lastUpdate, setLastUpdate] = useState<string>('');
-  const [loading, setLoading] = useState<boolean>(true);
-  const [refreshing, setRefreshing] = useState<boolean>(false);
-  const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
-  const intervalRef = useRef<any>(null);
-  const favoriteIntervalRef = useRef<any>(null);
-  const favoriteRefreshInFlightRef = useRef<boolean>(false);
-
-  // 刷新冷卻時間（毫秒）
-  const REFRESH_COOLDOWN = 3000; // 3 秒
+  const favoriteMountedRef = useRef(false);
+  const favoriteIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const favoriteRefreshInFlightRef = useRef(false);
 
   // 常用路線狀態
   const [favoriteRoutes, setFavoriteRoutes] = useState<FavoriteRoute[]>([]);
-  const [selectedRouteIndex, setSelectedRouteIndex] = useState<number>(0);
-  const selectedRouteIndexRef = useRef<number>(0);
+  const [favoritesLoaded, setFavoritesLoaded] = useState(false);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
+  const selectedRouteIndexRef = useRef(0);
   const favoriteRoutesRef = useRef<FavoriteRoute[]>([]);
-  
-  // 顯示模式: 'favorite' | 'nearby' | 'default'
-  const [displayMode, setDisplayMode] = useState<'favorite' | 'nearby' | 'default'>('default');
   
   // 滑動相關 ref
   const pagerRef = useRef<PagerView>(null);
   const routeButtonScrollRef = useRef<ScrollView>(null);
   const [allFavoriteArrivals, setAllFavoriteArrivals] = useState<UIArrival[][]>([]);
+
+  useEffect(() => {
+    favoriteMountedRef.current = true;
+
+    return () => {
+      favoriteMountedRef.current = false;
+      if (favoriteIntervalRef.current) {
+        clearInterval(favoriteIntervalRef.current);
+        favoriteIntervalRef.current = null;
+      }
+    };
+  }, []);
   
   // 長按選單狀態
   const [menuVisible, setMenuVisible] = useState<boolean>(false);
@@ -159,82 +157,7 @@ export default function StopScreen() {
     router.push('/route');
   };
 
-  // 在應用啟動時請求位置權限
-  useEffect(() => {
-    (async () => {
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          console.log('位置權限已授予');
-        } else {
-          console.log('位置權限被拒絕');
-        }
-      } catch (error) {
-        console.error('請求位置權限時發生錯誤:', error);
-      }
-    })();
-  }, []);
-
-  // 初始化 Service 並加載最近站牌
-  useEffect(() => {
-    const initService = async () => {
-      // 新版 BusPlannerService 不需要 initialize，constructor 已同步載入資料
-      setServiceReady(true);
-
-      // 如果 URL 參數有站牌名，優先使用
-      if (name && typeof name === 'string') {
-        setSelectedStop(name);
-        await saveRecentStop(name);
-        return;
-      }
-
-      // 嘗試加載最近使用的站牌
-      try {
-        const recentStop = await AsyncStorage.getItem('@recent_stop');
-        if (recentStop) {
-          console.log('使用最近站牌:', recentStop);
-          setSelectedStop(recentStop);
-          return;
-        }
-      } catch (error) {
-        console.error('加載最近站牌失敗:', error);
-      }
-
-      // 嘗試使用地理位置找最近站牌
-      try {
-        const { status } = await Location.getForegroundPermissionsAsync();
-        if (status === 'granted') {
-          console.log('定位權限已授予，正在定位...');
-          const location = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced,
-          });
-          
-          const nearestStop = plannerRef.current.findNearestStop(
-            location.coords.latitude,
-            location.coords.longitude
-          );
-          
-          if (nearestStop) {
-            console.log('找到最近站牌:', nearestStop);
-            setSelectedStop(nearestStop);
-            await saveRecentStop(nearestStop);
-            return;
-          }
-        } else {
-          console.log('定位權限未授予，使用默認站牌');
-        }
-      } catch (error) {
-        console.error('無法取得地理位置:', error);
-      }
-
-      // 如果以上都失敗或沒有定位權限，使用默認站牌
-      console.log('使用默認站牌: 捷運公館站');
-      setSelectedStop('捷運公館站');
-      await saveRecentStop('捷運公館站');
-    };
-    initService();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 僅掛載時初始化站牌（URL name→最近→定位→預設）；加入 name 會在參數變動時重置站牌/重新定位
-  }, []);
+  useEffect(() => setServiceReady(true), []);
 
   // 當 serviceReady 變為 true 時，立即載入常用路線
   useEffect(() => {
@@ -254,18 +177,6 @@ export default function StopScreen() {
     }, [serviceReady])
   );
 
-  // 監聽 displayMode 和 favoriteRoutes 變化，確保切換到 favorite 模式時按鈕狀態同步
-  const prevDisplayModeRef = useRef<'favorite' | 'nearby' | 'default'>(displayMode);
-  useEffect(() => {
-    // 只有當 displayMode 從非 favorite 切換到 favorite 時才同步按鈕高亮
-    if (displayMode === 'favorite' && prevDisplayModeRef.current !== 'favorite' && 
-        favoriteRoutes.length > 0) {
-      // 只同步按鈕滾動位置，不改變 PagerView 的當前頁
-      scrollRouteButtonToCenter(selectedRouteIndex);
-    }
-    prevDisplayModeRef.current = displayMode;
-  }, [displayMode, favoriteRoutes.length, selectedRouteIndex]);
-
   useEffect(() => {
     selectedRouteIndexRef.current = selectedRouteIndex;
   }, [selectedRouteIndex]);
@@ -273,95 +184,6 @@ export default function StopScreen() {
   useEffect(() => {
     favoriteRoutesRef.current = favoriteRoutes;
   }, [favoriteRoutes]);
-
-  // 保存最近使用的站牌
-  const saveRecentStop = async (stopName: string) => {
-    try {
-      await AsyncStorage.setItem('@recent_stop', stopName);
-    } catch (error) {
-      console.error('保存最近站牌失敗:', error);
-    }
-  };
-
-  // 監聽站名或 Service 準備好後開始抓資料
-  useEffect(() => {
-    if (serviceReady && selectedStop) {
-      fetchBusData(selectedStop, false); // 初始載入
-      // 移除這裡的 loadFavoriteRoutes()，因為已經在 initService 中提前執行
-      // 保存最近站牌
-      saveRecentStop(selectedStop);
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      intervalRef.current = setInterval(() => fetchBusData(selectedStop, true), AUTO_REFRESH_MS); // 自動更新傳 true
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (favoriteIntervalRef.current) clearInterval(favoriteIntervalRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- interval 已顯式帶入當前 selectedStop（已列依賴）；加入 fetchBusData 會在每次 render / 手動刷新（refreshing 變動）時重設 10 秒計時器
-  }, [selectedStop, serviceReady]);
-
-  // 抓資料核心邏輯 (使用新 API)
-  const fetchBusData = async (stopName = selectedStop, isAutoRefresh = false) => {
-    try {
-      if (!stopName || !serviceReady) return;
-      setLoading(prev => prev && !refreshing);
-
-      // 1. 取得該站名的所有代表性 SID
-      const sids = plannerRef.current.getRepresentativeSids(stopName);
-      
-      if (sids.length === 0) {
-        console.warn(`查無站牌 ID: ${stopName}`);
-        setArrivals([]);
-        setLastUpdate(new Date().toLocaleTimeString());
-        return;
-      }
-
-      // 2. 平行抓取所有 SID 的公車資料（包含所有方向）
-      console.log('Fetching data for SIDs:', sids);
-      const allResults = await Promise.all(
-        sids.map(sid => plannerRef.current.fetchBusesAtSid(sid))
-      );
-      
-      // 3. 合併並轉換資料
-      const allBuses = allResults.flat().flat();
-      
-      // 轉換為 UI 格式並排序 (使用共用比較器)
-      const uiArrivals: UIArrival[] = allBuses
-        .sort((a, b) => compareArrivals(a, b))
-        .map((bus) => ({
-          rid: bus.rid,
-          route: bus.route,
-          routeName: bus.route,
-          preferredDirection: bus.direction || '',
-          estimatedTime: bus.timeText,
-          key: `${bus.rid}-${bus.route}-${bus.direction || 'default'}`, // 使用 rid+route+direction 區分
-        }));
-
-      setArrivals(uiArrivals);
-      setLastUpdate(new Date().toLocaleTimeString());
-
-    } catch (e) {
-      console.error('fetchBusData error', e);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-
-  const onRefresh = () => {
-    const now = Date.now();
-    const timeSinceLastRefresh = now - lastRefreshTime;
-    
-    // 如果距離上次刷新少於冷卻時間，則忽略
-    if (timeSinceLastRefresh < REFRESH_COOLDOWN) {
-      console.log(`請稍候 ${Math.ceil((REFRESH_COOLDOWN - timeSinceLastRefresh) / 1000)} 秒後再刷新`);
-      return;
-    }
-    
-    setLastRefreshTime(now);
-    setRefreshing(true);
-    fetchBusData(selectedStop, false); // 手動刷新重新載入所有資料
-  };
 
   // 處理 PagerView 頁面變化（滑動切換）
   const handlePageSelected = (e: any) => {
@@ -581,19 +403,21 @@ export default function StopScreen() {
   };
 
   const startFavoriteAutoRefresh = () => {
+    if (!favoriteMountedRef.current) return;
     if (favoriteIntervalRef.current) clearInterval(favoriteIntervalRef.current);
 
     favoriteIntervalRef.current = setInterval(async () => {
       try {
         console.log('🔄 自動刷新常用路線動態...');
         const currentRoutes = await favoriteRoutesService.getAllRoutes(true);
+        if (!favoriteMountedRef.current) return;
+
         syncFavoriteRoutes(currentRoutes);
 
         if (currentRoutes.length > 0) {
           clampSelectedRouteIndex(currentRoutes.length);
           loadAllFavoriteRoutesArrivals(currentRoutes, true);
         } else {
-          setDisplayMode('default');
           setAllFavoriteArrivals([]);
           if (favoriteIntervalRef.current) clearInterval(favoriteIntervalRef.current);
         }
@@ -607,28 +431,33 @@ export default function StopScreen() {
   const loadFavoriteRoutes = async () => {
     try {
       const routes = await favoriteRoutesService.getAllRoutes(true);
+      if (!favoriteMountedRef.current) return;
+
       console.log('已載入常用路線:', routes.length, '條');
 
       if (routes.length > 0) {
         const selectedIndex = clampSelectedRouteIndex(routes.length);
         seedFavoriteArrivalsFromCache(routes, selectedIndex);
         syncFavoriteRoutes(routes);
-        setDisplayMode('favorite');
         loadAllFavoriteRoutesArrivals(routes, false);
         startFavoriteAutoRefresh();
       } else {
         syncFavoriteRoutes([]);
-        setDisplayMode('default');
         setAllFavoriteArrivals([]);
         if (favoriteIntervalRef.current) clearInterval(favoriteIntervalRef.current);
       }
     } catch (error) {
       console.error('載入常用路線失敗:', error);
+    } finally {
+      if (favoriteMountedRef.current) {
+        setFavoritesLoaded(true);
+      }
     }
   };
 
   // 預載所有常用路線的公車動態（自動更新時保留舊資料直到新資料完成）
   const loadAllFavoriteRoutesArrivals = async (routes: FavoriteRoute[], isAutoRefresh = false) => {
+    if (!favoriteMountedRef.current) return;
     if (isAutoRefresh && favoriteRefreshInFlightRef.current) {
       console.log('🔄 [自動更新] 上一輪尚未完成，略過本次更新');
       return;
@@ -642,6 +471,7 @@ export default function StopScreen() {
         const allNewArrivals: UIArrival[][] = [];
         for (let i = 0; i < routes.length; i++) {
           allNewArrivals[i] = await fetchSingleRouteArrivals(routes[i], i);
+          if (!favoriteMountedRef.current) return;
         }
 
         setAllFavoriteArrivals(previous =>
@@ -661,6 +491,8 @@ export default function StopScreen() {
       console.log('🆕 [Index] 初始載入模式 - 逐條載入路線');
       for (let i = 0; i < routes.length; i++) {
         const arrivals = await fetchSingleRouteArrivals(routes[i], i);
+        if (!favoriteMountedRef.current) return;
+
         const nextArrivals: UIArrival[][] = [];
         nextArrivals[i] = arrivals;
 
@@ -841,19 +673,6 @@ export default function StopScreen() {
       </View>
     );
   };
-
-  const renderItem = ({ item }: { item: UIArrival }) => (
-    <TouchableOpacity
-      onPress={() => openRouteDetails(item.routeName, item.rid, item.preferredDirection)}
-    >
-      <View style={styles.row}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.route}>{item.route}</Text>
-        </View>
-        <View style={{ alignItems: 'flex-end' }}>{renderBadge(item.estimatedTime)}</View>
-      </View>
-    </TouchableOpacity>
-  );
 
   const renderFavoriteRouteItem = ({ item }: { item: UIArrival }) => (
     <TouchableOpacity
@@ -1041,18 +860,15 @@ export default function StopScreen() {
         </View>
       </View>
 
-      {/* 常用路線快捷按鈕或路線規劃 */}
-      <View style={styles.quickRouteContainer}>
-        <View style={styles.quickRouteTitleRow}>
-          <Text style={styles.quickRouteTitle}>
-            {favoriteRoutes.length > 0 ? '常用路線' : '路線規劃'}
-          </Text>
-        </View>
-        <View style={styles.quickRouteRow}>
-          {favoriteRoutes.length > 0 ? (
-            <ScrollView 
+      {favoriteRoutes.length > 0 ? (
+        <View style={styles.quickRouteContainer}>
+          <View style={styles.quickRouteTitleRow}>
+            <Text style={styles.quickRouteTitle}>常用路線</Text>
+          </View>
+          <View style={styles.quickRouteRow}>
+            <ScrollView
               ref={routeButtonScrollRef}
-              horizontal 
+              horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.quickRouteScrollContent}
               style={styles.quickRouteScrollView}
@@ -1062,16 +878,13 @@ export default function StopScreen() {
                   key={route.id}
                   style={[
                     styles.quickRouteButton,
-                    selectedRouteIndex === index && displayMode === 'favorite' && styles.quickRouteButtonActive
+                    selectedRouteIndex === index && styles.quickRouteButtonActive,
                   ]}
                   onPress={() => {
                     selectedRouteIndexRef.current = index;
                     setSelectedRouteIndex(index);
                     scrollRouteButtonToCenter(index);
-                    // 觸發 PagerView 滑動到對應頁面
-                    if (pagerRef.current) {
-                      pagerRef.current.setPage(index);
-                    }
+                    pagerRef.current?.setPage(index);
                     if (allFavoriteArrivals[index]) {
                       void prefetchFavoriteRouteDetails(allFavoriteArrivals[index]);
                     }
@@ -1080,47 +893,50 @@ export default function StopScreen() {
                   delayLongPress={Platform.OS === 'web' ? 300 : 500}
                   activeOpacity={0.7}
                 >
-                  {route.pinned && <Text style={styles.pinIcon}>📌</Text>}
+                  {route.pinned ? <Text style={styles.pinIcon}>📌</Text> : null}
                   {route.displayName ? (
                     <Text style={[
                       styles.quickRouteDisplayName,
-                      selectedRouteIndex === index && displayMode === 'favorite' && styles.quickRouteTextActive
-                    ]}>{route.displayName}</Text>
+                      selectedRouteIndex === index && styles.quickRouteTextActive,
+                    ]}>
+                      {route.displayName}
+                    </Text>
                   ) : (
                     <>
                       <Text style={[
                         styles.quickRouteFrom,
-                        selectedRouteIndex === index && displayMode === 'favorite' && styles.quickRouteTextActive
-                      ]}>{route.fromStop}</Text>
+                        selectedRouteIndex === index && styles.quickRouteTextActive,
+                      ]}>
+                        {route.fromStop}
+                      </Text>
                       <Text style={styles.quickRouteArrow}>→</Text>
                       <Text style={[
                         styles.quickRouteTo,
-                        selectedRouteIndex === index && displayMode === 'favorite' && styles.quickRouteTextActive
-                      ]}>{route.toStop}</Text>
+                        selectedRouteIndex === index && styles.quickRouteTextActive,
+                      ]}>
+                        {route.toStop}
+                      </Text>
                     </>
                   )}
                 </TouchableOpacity>
               ))}
             </ScrollView>
-          ) : (
-            <View style={styles.quickRouteScrollView} />
-          )}
-          <TouchableOpacity 
-            style={styles.addRouteButtonInline}
-            onPress={openRoutePlanner}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.addRouteButtonText}>+</Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.addRouteButtonInline}
+              onPress={openRoutePlanner}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.addRouteButtonText}>+</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
+      ) : null}
 
-      {/* 通知設定 */}
-      {/* 移到 FlatList 的 ListHeaderComponent */}
-
-      {/* 根據優先順序顯示公車動態 */}
-      {displayMode === 'favorite' && favoriteRoutes.length > 0 ? (
-        // 顯示常用路線公車（可左右滑動切換）
+      {!favoritesLoaded ? (
+        <View style={styles.favoriteLoading}>
+          <ActivityIndicator size="large" color="#6F73F8" />
+        </View>
+      ) : favoriteRoutes.length > 0 ? (
         <View style={styles.pagerContainer}>
           <PagerView
             ref={pagerRef}
@@ -1138,68 +954,19 @@ export default function StopScreen() {
                 <FlatList
                   data={allFavoriteArrivals[index] || []}
                   renderItem={renderFavoriteRouteItem}
-                  keyExtractor={(item) => item.key}
-                  scrollEnabled={true}
+                  keyExtractor={item => item.key}
+                  scrollEnabled
                   contentContainerStyle={styles.flatListContent}
                   extraData={allFavoriteArrivals[index]}
-                  removeClippedSubviews={true}
+                  removeClippedSubviews
                 />
               </View>
             ))}
           </PagerView>
         </View>
       ) : (
-        // 顯示預設站牌公車
-        <>
-          <View style={styles.directionBar}>
-            <Text style={styles.directionBarText}>{selectedStop}</Text>
-            {Platform.OS === 'web' && (
-              <TouchableOpacity
-                onPress={onRefresh}
-                disabled={refreshing}
-                style={styles.refreshButton}
-              >
-                <Text style={styles.refreshButtonText}>
-                  {refreshing ? '更新中...' : '刷新'}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {loading ? (
-            <View style={styles.loading}>
-              <ActivityIndicator size="large" />
-              <Text style={{ color: '#999', marginTop: 8 }}>載入中...</Text>
-            </View>
-          ) : (
-            <FlatList
-              data={arrivals}
-              renderItem={renderItem}
-              keyExtractor={(item) => item.key}
-              ListHeaderComponent={<NotificationSettings />}
-              refreshControl={
-                Platform.OS !== 'web' ? (
-                  <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-                ) : undefined
-              }
-              extraData={arrivals}
-              removeClippedSubviews={true}
-              ListEmptyComponent={
-                <View style={styles.empty}>
-                  <Text style={styles.emptyText}>目前無公車資訊</Text>
-                  <Text style={styles.hintText}>或查無此站牌資料</Text>
-                </View>
-              }
-              contentContainerStyle={{ paddingBottom: 120 }}
-            />
-          )}
-        </>
+        <HomeEmptyState onAddRoute={openRoutePlanner} />
       )}
-
-      {/* 更新時間 */}
-      <View style={styles.footer}>
-        <Text style={styles.updateText}>更新時間：{lastUpdate || '—'}</Text>
-      </View>
       </Animated.View>
 
       {/* 側欄遮罩 */}
@@ -1309,6 +1076,11 @@ const styles = StyleSheet.create({
   },
   pagerContainer: {
     flex: 1,
+  },
+  favoriteLoading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   pagerView: {
     flex: 1,
@@ -1443,17 +1215,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   directionBarText: { color: '#fff', fontSize: 22, fontWeight: '700' },
-  refreshButton: {
-    backgroundColor: '#6F73F8',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  refreshButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
   row: {
     flexDirection: 'row',
     paddingHorizontal: 25,
@@ -1478,12 +1239,6 @@ const styles = StyleSheet.create({
   badgeSoftRedText: { color: '#D7343A', fontWeight: '800', fontSize: 16 },
   badgeBlue: { backgroundColor: '#6F73F8' },
   badgeGray: { backgroundColor: '#7f8686' },
-  loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  empty: { marginTop: 40, alignItems: 'center' },
-  emptyText: { color: '#9aa6a6', fontSize: 18, fontWeight: '700' },
-  hintText: { color: '#6d746f', marginTop: 18 },
-  footer: { position: 'absolute', bottom: 18, left: 0, right: 0, alignItems: 'center' },
-  updateText: { color: '#6f7a78', fontSize: 12 },
   // 側欄樣式
   sidebarContainer: {
     position: 'absolute',
