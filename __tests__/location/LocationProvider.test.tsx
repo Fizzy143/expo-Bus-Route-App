@@ -114,7 +114,7 @@ describe('LocationProvider', () => {
     expect(result.current.location?.lat).not.toBe(99);
   });
 
-  it('keeps the last reliable position when a degraded sample arrives', async () => {
+  it('advances to a newer usable degraded watcher sample without recreating the watch', async () => {
     const fake = createFakeLocationAdapter();
     const runtime = createFakeRuntime();
     const { result } = await renderHook(() => useUserLocation(), {
@@ -129,7 +129,14 @@ describe('LocationProvider', () => {
       timestamp: 2000,
     }));
 
-    expect(result.current.location?.timestamp).toBe(1000);
+    expect(result.current.location).toMatchObject({
+      lat: 25.5,
+      lon: 121.5,
+      accuracy: 150,
+      timestamp: 2000,
+    });
+    expect(result.current.status).toBe('degraded');
+    expect(fake.watches).toHaveLength(1);
   });
 
   it('does not watch or retry when permission is denied', async () => {

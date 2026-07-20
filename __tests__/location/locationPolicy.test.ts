@@ -33,16 +33,19 @@ describe('acceptLocationSample', () => {
     expect(acceptLocationSample(current, sample(3000, 201)).accepted).toBe(false);
   });
 
-  it('does not replace a reliable sample with degraded accuracy', () => {
+  it('accepts a newer usable degraded sample instead of freezing a reliable history', () => {
     const current: LocationSnapshot = {
       location: sample(2000, 30),
       hasReliableLocation: true,
     };
 
-    expect(acceptLocationSample(current, sample(3000, 150))).toEqual({
-      accepted: false,
+    expect(acceptLocationSample(current, sample(3000, 150, 25.02, 121.54))).toEqual({
+      accepted: true,
       quality: 'degraded',
-      snapshot: current,
+      snapshot: {
+        location: sample(3000, 150, 25.02, 121.54),
+        hasReliableLocation: false,
+      },
     });
   });
 

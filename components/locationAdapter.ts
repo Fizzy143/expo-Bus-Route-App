@@ -41,16 +41,70 @@ export interface LocationAdapter {
 const normalizePermission = (status: string): ForegroundPermissionStatus =>
   status === 'granted' || status === 'denied' ? status : 'undetermined';
 
-const toSample = (location: Location.LocationObject): UserLocationSample => ({
+interface LocationLike {
+  coords: {
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+  };
+  timestamp: number;
+}
+
+const toSample = (location: LocationLike): UserLocationSample => ({
   lat: location.coords.latitude,
   lon: location.coords.longitude,
   accuracy: location.coords.accuracy,
   timestamp: location.timestamp,
 });
 
+const getBrowserGeolocation = (): Geolocation | null =>
+  typeof navigator !== 'undefined' && 'geolocation' in navigator
+    ? navigator.geolocation
+    : null;
+
 const hasGeolocationApi = () =>
-  Platform.OS !== 'web' ||
-  (typeof navigator !== 'undefined' && 'geolocation' in navigator);
+  Platform.OS !== 'web' || getBrowserGeolocation() !== null;
+
+export function buildWebPositionOptions(
+  mode: LocationTrackingMode
+): PositionOptions {
+  return {
+    enableHighAccuracy: mode === 'trip',
+    maximumAge: mode === 'trip' ? 0 : 15_000,
+    timeout: 15_000,
+  };
+}
+
+const toBrowserLocationError = (error: GeolocationPositionError): Error =>
+  new Error(error.message || 'Browser geolocation failed');
+
+export function getBrowserCurrentLocation(
+  geolocation: Geolocation,
+  mode: LocationTrackingMode
+): Promise<UserLocationSample> {
+  return new Promise((resolve, reject) => {
+    geolocation.getCurrentPosition(
+      position => resolve(toSample(position)),
+      error => reject(toBrowserLocationError(error)),
+      buildWebPositionOptions(mode)
+    );
+  });
+}
+
+export function watchBrowserLocation(
+  geolocation: Geolocation,
+  mode: LocationTrackingMode,
+  onLocation: (sample: UserLocationSample) => void,
+  onError: (error: Error) => void
+): LocationSubscription {
+  const watchId = geolocation.watchPosition(
+    position => onLocation(toSample(position)),
+    error => onError(toBrowserLocationError(error)),
+    buildWebPositionOptions(mode)
+  );
+
+  return { remove: () => geolocation.clearWatch(watchId) };
+}
 
 export function buildLocationOptions(
   mode: LocationTrackingMode,
@@ -80,9 +134,21 @@ export const expoLocationAdapter: LocationAdapter = {
   },
   hasServices: () => Location.hasServicesEnabledAsync(),
   async getCurrentLocation(mode) {
+    if (Platform.OS === 'web') {
+      const geolocation = getBrowserGeolocation();
+      if (!geolocation) throw new Error('Browser geolocation is unavailable');
+      return getBrowserCurrentLocation(geolocation, mode);
+    }
+
     return toSample(await Location.getCurrentPositionAsync(buildLocationOptions(mode)));
   },
   async watchLocation(mode, onLocation, onError) {
+    if (Platform.OS === 'web') {
+      const geolocation = getBrowserGeolocation();
+      if (!geolocation) throw new Error('Browser geolocation is unavailable');
+      return watchBrowserLocation(geolocation, mode, onLocation, onError);
+    }
+
     return Location.watchPositionAsync(
       buildLocationOptions(mode),
       (location) => onLocation(toSample(location)),

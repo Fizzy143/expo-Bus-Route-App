@@ -49,16 +49,12 @@ export function acceptLocationSample(
     candidate.accuracy !== null &&
     candidate.accuracy <= LOCATION_ACCURACY.reliableMeters;
 
-  if (!reliable && previous.hasReliableLocation) {
-    return { accepted: false, quality: 'degraded', snapshot: previous };
-  }
-
   return {
     accepted: true,
     quality: reliable ? 'reliable' : 'degraded',
     snapshot: {
       location: candidate,
-      hasReliableLocation: reliable || previous.hasReliableLocation,
+      hasReliableLocation: reliable,
     },
   };
 }
