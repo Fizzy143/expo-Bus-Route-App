@@ -348,13 +348,17 @@ export default function MapNative() {
 
   if (!region) {
     const isLoading = status === 'requesting' || status === 'paused';
+    const isDegraded = status === 'degraded';
+    const locationMessage = isLoading
+      ? '取得位置中…'
+      : isDegraded
+        ? '定位訊號不穩定，正在持續嘗試…'
+        : '目前無法取得位置。';
 
     return (
       <View style={styles.center}>
         {isLoading ? <ActivityIndicator size="large" /> : null}
-        <Text style={styles.hint}>
-          {isLoading ? '取得位置中…' : '目前無法取得位置。'}
-        </Text>
+        <Text style={styles.hint}>{locationMessage}</Text>
         {!isLoading ? (
           <TouchableOpacity style={styles.button} onPress={back}>
             <Text style={styles.buttonText}>返回</Text>

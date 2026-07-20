@@ -156,7 +156,7 @@ describe('LocationProvider', () => {
     expect(fake.adapter.watchLocation).not.toHaveBeenCalled();
   });
 
-  it('retries transient startup failures after 1s, 2s, and 5s only', async () => {
+  it('continues standard retries every 30s after the fast ramp', async () => {
     jest.useFakeTimers();
     const fake = createFakeLocationAdapter();
     (fake.adapter.getCurrentLocation as jest.Mock).mockRejectedValue(new Error('temporary'));
@@ -167,7 +167,13 @@ describe('LocationProvider', () => {
     await act(async () => { await Promise.resolve(); });
     expect(result.current.status).toBe('degraded');
 
-    for (const [delay, attempts] of [[1000, 2], [2000, 3], [5000, 4]] as const) {
+    for (const [delay, attempts] of [
+      [1000, 2],
+      [2000, 3],
+      [5000, 4],
+      [30_000, 5],
+      [30_000, 6],
+    ] as const) {
       await act(async () => {
         jest.advanceTimersByTime(delay);
         await Promise.resolve();
@@ -176,9 +182,75 @@ describe('LocationProvider', () => {
       });
       expect(fake.adapter.getCurrentLocation).toHaveBeenCalledTimes(attempts);
     }
+  });
 
-    await act(async () => { jest.advanceTimersByTime(30_000); });
-    expect(fake.adapter.getCurrentLocation).toHaveBeenCalledTimes(4);
+  it('recovers after the capped retry and resets a later watcher error to 1s', async () => {
+    jest.useFakeTimers();
+    const fake = createFakeLocationAdapter();
+    (fake.adapter.getCurrentLocation as jest.Mock)
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockRejectedValueOnce(new Error('temporary'));
+    const runtime = createFakeRuntime();
+    const { result } = await renderHook(() => useUserLocation(), {
+      wrapper: makeWrapper(fake.adapter, runtime.runtime),
+    });
+
+    await act(async () => { await Promise.resolve(); });
+    for (const delay of [1000, 2000, 5000, 30_000]) {
+      await act(async () => {
+        jest.advanceTimersByTime(delay);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    }
+
+    expect(result.current.status).toBe('tracking');
+    expect(fake.watches).toHaveLength(1);
+
+    await act(async () => fake.watches[0].onError(new Error('later')));
+    await act(async () => { jest.advanceTimersByTime(999); });
+    expect(fake.adapter.getCurrentLocation).toHaveBeenCalledTimes(5);
+    await act(async () => {
+      jest.advanceTimersByTime(1);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fake.adapter.getCurrentLocation).toHaveBeenCalledTimes(6);
+  });
+
+  it('cancels a pending retry while hidden', async () => {
+    jest.useFakeTimers();
+    const fake = createFakeLocationAdapter();
+    (fake.adapter.getCurrentLocation as jest.Mock).mockRejectedValue(new Error('temporary'));
+    const runtime = createFakeRuntime();
+    const { result } = await renderHook(() => useUserLocation(), {
+      wrapper: makeWrapper(fake.adapter, runtime.runtime),
+    });
+
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => runtime.setVisible(false));
+    await waitFor(() => expect(result.current.status).toBe('paused'));
+    await act(async () => { jest.advanceTimersByTime(60_000); });
+    expect(fake.adapter.getCurrentLocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a pending retry on unmount', async () => {
+    jest.useFakeTimers();
+    const fake = createFakeLocationAdapter();
+    (fake.adapter.getCurrentLocation as jest.Mock).mockRejectedValue(new Error('temporary'));
+    const runtime = createFakeRuntime();
+    const { unmount } = await renderHook(() => useUserLocation(), {
+      wrapper: makeWrapper(fake.adapter, runtime.runtime),
+    });
+
+    await act(async () => { await Promise.resolve(); });
+    await unmount();
+    await act(async () => { jest.advanceTimersByTime(60_000); });
+    expect(fake.adapter.getCurrentLocation).toHaveBeenCalledTimes(1);
   });
 
   it('removes the active watch on unmount', async () => {

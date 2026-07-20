@@ -80,6 +80,8 @@ export default function RouteScreen() {
     [location]
   );
   const loadingNearbyStops = !location && locationStatus === 'requesting';
+  const showDegradedLocationHint =
+    !location && locationStatus === 'degraded' && searchQuery.trim() === '';
 
   const runRoutePlan = useCallback(async (startStop: string, endStop: string) => {
     if (!startStop || !endStop) {
@@ -531,6 +533,10 @@ export default function RouteScreen() {
           <View style={styles.loadingNearbyContainer}>
             <ActivityIndicator size="small" color="#6F73F8" />
             <Text style={styles.loadingNearbyText}>正在取得附近站牌...</Text>
+          </View>
+        ) : showDegradedLocationHint ? (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyText}>定位訊號不穩定，正在持續嘗試…</Text>
           </View>
         ) : searchQuery.trim() === '' && nearbyStops.length > 0 ? (
           <View style={styles.nearbySection}>

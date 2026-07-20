@@ -1,8 +1,22 @@
 import {
   LOCATION_ACCURACY,
   type LocationSnapshot,
+  type LocationTrackingMode,
   type UserLocationSample,
 } from './locationTypes';
+
+const FAST_RETRY_DELAYS = [1000, 2000, 5000] as const;
+const CAPPED_RETRY_DELAY: Record<LocationTrackingMode, number> = {
+  trip: 15_000,
+  standard: 30_000,
+};
+
+export function getLocationRetryDelay(
+  attempt: number,
+  mode: LocationTrackingMode
+): number {
+  return FAST_RETRY_DELAYS[attempt] ?? CAPPED_RETRY_DELAY[mode];
+}
 
 export interface LocationDecision {
   accepted: boolean;

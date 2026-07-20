@@ -10,7 +10,7 @@ const mockLocationState: {
     accuracy: number;
     timestamp: number;
   };
-  status: 'tracking' | 'requesting';
+  status: 'tracking' | 'requesting' | 'degraded';
 } = {
   location: { lat: 25.013, lon: 121.535, accuracy: 20, timestamp: 1000 },
   status: 'tracking',
@@ -108,5 +108,30 @@ it('updates Route nearby candidates without replacing a manual query', async () 
     800,
     10
   );
+  await screen.unmount();
+});
+
+it('shows degraded location feedback in Search without blocking manual input', async () => {
+  mockLocationState.location = null;
+  mockLocationState.status = 'degraded';
+
+  const screen = await render(<SearchScreen />);
+
+  expect(screen.getByText('定位訊號不穩定，正在持續嘗試…')).toBeTruthy();
+  await fireEvent.changeText(screen.getByPlaceholderText('搜尋站牌'), '台北');
+  expect(screen.getByDisplayValue('台北')).toBeTruthy();
+  await screen.unmount();
+});
+
+it('shows degraded location feedback in Route without blocking manual input', async () => {
+  mockLocationState.location = null;
+  mockLocationState.status = 'degraded';
+
+  const screen = await render(<RouteScreen />);
+  await fireEvent.press(screen.getByText('選擇起點站牌'));
+
+  expect(screen.getByText('定位訊號不穩定，正在持續嘗試…')).toBeTruthy();
+  await fireEvent.changeText(screen.getByPlaceholderText('搜尋站牌'), '公館');
+  expect(screen.getByDisplayValue('公館')).toBeTruthy();
   await screen.unmount();
 });

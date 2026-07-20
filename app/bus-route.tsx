@@ -160,7 +160,6 @@ export default function BusRouteDetailScreen() {
   const pagerRef = useRef<PagerView>(null);
   const selectedDirectionRef = useRef(0);
   const directionListRefs = useRef<Record<number, FlatList<RouteStopArrival> | null>>({});
-  const pendingCenterDirectionRef = useRef<number | null>(null);
   const pendingPagerDirectionIndexRef = useRef<number | null>(null);
   const hasAppliedPreferredDirectionRef = useRef(false);
   const { location, status: locationStatus, setTrackingMode } = useUserLocation();
@@ -248,10 +247,6 @@ export default function BusRouteDetailScreen() {
     }
   }, []);
 
-  const queueCenterDirection = useCallback((direction: number) => {
-    pendingCenterDirectionRef.current = direction;
-  }, []);
-
   const centerNearestStop = useCallback(
     (direction: number, retryCount = 0) => {
       const nearestIndex = nearestStopIndexByDirection[direction];
@@ -273,14 +268,9 @@ export default function BusRouteDetailScreen() {
           index: nearestIndex,
           viewPosition: NEAREST_STOP_VIEW_POSITION,
         });
-        if (pendingCenterDirectionRef.current === direction) {
-          pendingCenterDirectionRef.current = null;
-        }
       } catch {
         if (retryCount < MAX_CENTER_RETRIES) {
           setTimeout(() => centerNearestStop(direction, retryCount + 1), CENTER_RETRY_DELAY_MS);
-        } else if (pendingCenterDirectionRef.current === direction) {
-          pendingCenterDirectionRef.current = null;
         }
       }
     },
@@ -324,18 +314,6 @@ export default function BusRouteDetailScreen() {
     [directionData]
   );
 
-  const queueCenterDirectionByIndex = useCallback(
-    (index: number) => {
-      const directionKey = getDirectionKeyAtIndex(index);
-      if (directionKey === undefined) {
-        return;
-      }
-
-      queueCenterDirection(directionKey);
-    },
-    [getDirectionKeyAtIndex, queueCenterDirection]
-  );
-
   const centerNearestStopByIndex = useCallback(
     (index: number) => {
       const directionKey = getDirectionKeyAtIndex(index);
@@ -354,10 +332,9 @@ export default function BusRouteDetailScreen() {
     const directionKey = getDirectionKeyAtIndex(selectedDirectionRef.current);
 
     if (result.shouldScroll && directionKey !== undefined) {
-      queueCenterDirection(directionKey);
       centerNearestStop(directionKey);
     }
-  }, [centerNearestStop, getDirectionKeyAtIndex, queueCenterDirection]);
+  }, [centerNearestStop, getDirectionKeyAtIndex]);
 
   useFocusEffect(useCallback(() => {
     setTrackingMode('trip');
@@ -372,17 +349,20 @@ export default function BusRouteDetailScreen() {
 
   useEffect(() => {
     const nearestIndex = stableNearestStop?.index ?? null;
-    const result = routeFollowNearestChanged(followStateRef.current, nearestIndex);
+    const result = routeFollowNearestChanged(
+      followStateRef.current,
+      nearestIndex,
+      activeScopeKey
+    );
     followStateRef.current = result.state;
 
     if (result.shouldScroll && activeDirection) {
-      queueCenterDirection(activeDirection.direction);
       centerNearestStop(activeDirection.direction);
     }
   }, [
     activeDirection,
+    activeScopeKey,
     centerNearestStop,
-    queueCenterDirection,
     stableNearestStop?.index,
   ]);
 
@@ -503,7 +483,6 @@ export default function BusRouteDetailScreen() {
           selectedDirectionRef.current = preferredIndex;
           setSelectedDirection(preferredIndex);
           pendingPagerDirectionIndexRef.current = preferredIndex;
-          queueCenterDirection(baseDetails.directions[preferredIndex].direction);
           hasAppliedPreferredDirectionRef.current = true;
         }
 
@@ -521,7 +500,7 @@ export default function BusRouteDetailScreen() {
         setRefreshing(false);
       }
     },
-    [loadSingleDirection, preferredDirectionHint, preferredRid, queueCenterDirection, routeName]
+    [loadSingleDirection, preferredDirectionHint, preferredRid, routeName]
   );
 
   const ensureDirectionLoaded = useCallback(
@@ -555,7 +534,6 @@ export default function BusRouteDetailScreen() {
     setDirectionData([]);
     followStateRef.current = initialRouteFollowState;
     directionListRefs.current = {};
-    pendingCenterDirectionRef.current = null;
     pendingPagerDirectionIndexRef.current = null;
     hasAppliedPreferredDirectionRef.current = false;
     setLastUpdateAt(null);
@@ -579,10 +557,9 @@ export default function BusRouteDetailScreen() {
     }
 
     syncPagerToIndex(pendingIndex);
-    queueCenterDirection(directionData[pendingIndex].direction);
     void ensureDirectionLoaded(pendingIndex);
     pendingPagerDirectionIndexRef.current = null;
-  }, [directionData, ensureDirectionLoaded, queueCenterDirection, syncPagerToIndex]);
+  }, [directionData, ensureDirectionLoaded, syncPagerToIndex]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -592,13 +569,11 @@ export default function BusRouteDetailScreen() {
   const handleDirectionChange = (index: number) => {
     updateSelectedDirection(index);
     followStateRef.current = resumeRouteFollow(followStateRef.current).state;
-    queueCenterDirectionByIndex(index);
     void ensureDirectionLoaded(index);
   };
 
   const handleDirectionTabPress = (index: number) => {
     if (index === selectedDirection) {
-      queueCenterDirectionByIndex(index);
       centerNearestStopByIndex(index);
       return;
     }

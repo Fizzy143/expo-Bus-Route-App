@@ -26,6 +26,7 @@ export default function Map() {
     [location, radiusMeters]
   );
   const loading = !location && (status === 'requesting' || status === 'paused');
+  const degradedWithoutLocation = !location && status === 'degraded';
 
   const onCancel = () => {
     if (router.canGoBack()) {
@@ -58,6 +59,19 @@ export default function Map() {
           <Text style={styles.message}>
             請在系統設定中允許定位，以查看附近站牌
           </Text>
+          <TouchableOpacity onPress={onCancel} style={styles.backButton} activeOpacity={0.7}>
+            <Text style={styles.backButtonText}>返回</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  if (degradedWithoutLocation) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.messageContainer}>
+          <Text style={styles.message}>定位訊號不穩定，正在持續嘗試…</Text>
           <TouchableOpacity onPress={onCancel} style={styles.backButton} activeOpacity={0.7}>
             <Text style={styles.backButtonText}>返回</Text>
           </TouchableOpacity>

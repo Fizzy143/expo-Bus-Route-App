@@ -1,6 +1,7 @@
 export interface RouteFollowState {
   pausedAtIndex: number | null;
   lastNearestIndex: number | null;
+  scopeKey: string | null;
 }
 
 export interface RouteFollowResult {
@@ -11,6 +12,7 @@ export interface RouteFollowResult {
 export const initialRouteFollowState: RouteFollowState = {
   pausedAtIndex: null,
   lastNearestIndex: null,
+  scopeKey: null,
 };
 
 export function pauseRouteFollow(
@@ -29,10 +31,18 @@ export function resumeRouteFollow(state: RouteFollowState): RouteFollowResult {
 
 export function routeFollowNearestChanged(
   state: RouteFollowState,
-  nearestIndex: number | null
+  nearestIndex: number | null,
+  scopeKey: string
 ): RouteFollowResult {
   if (nearestIndex === null) {
     return { state: { ...state, lastNearestIndex: null }, shouldScroll: false };
+  }
+
+  if (state.scopeKey !== scopeKey) {
+    return {
+      state: { pausedAtIndex: null, lastNearestIndex: nearestIndex, scopeKey },
+      shouldScroll: true,
+    };
   }
 
   const movedToAnotherStop =
@@ -44,6 +54,7 @@ export function routeFollowNearestChanged(
     state: {
       pausedAtIndex: movedToAnotherStop ? null : state.pausedAtIndex,
       lastNearestIndex: nearestIndex,
+      scopeKey,
     },
     shouldScroll: movedToAnotherStop || followingAndChanged,
   };

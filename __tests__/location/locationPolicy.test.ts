@@ -1,6 +1,7 @@
 import {
   acceptLocationSample,
   createLatestThrottle,
+  getLocationRetryDelay,
 } from '../../components/locationPolicy';
 import type { LocationSnapshot, UserLocationSample } from '../../components/locationTypes';
 
@@ -84,5 +85,23 @@ describe('createLatestThrottle', () => {
     jest.advanceTimersByTime(3000);
 
     expect(emit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getLocationRetryDelay', () => {
+  it('uses the shared 1s, 2s, 5s fast ramp', () => {
+    expect([0, 1, 2].map(attempt =>
+      getLocationRetryDelay(attempt, 'standard')
+    )).toEqual([1000, 2000, 5000]);
+  });
+
+  it('caps trip retries at 15 seconds', () => {
+    expect(getLocationRetryDelay(3, 'trip')).toBe(15_000);
+    expect(getLocationRetryDelay(99, 'trip')).toBe(15_000);
+  });
+
+  it('caps standard retries at 30 seconds', () => {
+    expect(getLocationRetryDelay(3, 'standard')).toBe(30_000);
+    expect(getLocationRetryDelay(99, 'standard')).toBe(30_000);
   });
 });

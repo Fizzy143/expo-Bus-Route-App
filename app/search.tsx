@@ -41,6 +41,8 @@ export default function SearchScreen() {
     [location]
   );
   const loadingLocation = !location && locationStatus === 'requesting';
+  const showDegradedLocationHint =
+    !location && locationStatus === 'degraded' && query.trim() === '';
 
   // 3. 取得所有站名
   // 使用 useMemo 優化：只在組件首次載入時執行一次，避免每次打字 render 都重新提取 keys
@@ -105,6 +107,10 @@ export default function SearchScreen() {
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color="#6F73F8" />
           <Text style={styles.loadingText}>正在取得位置...</Text>
+        </View>
+      ) : showDegradedLocationHint ? (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>定位訊號不穩定，正在持續嘗試…</Text>
         </View>
       ) : query.trim() === '' && nearbyStops.length > 0 ? (
         <View>

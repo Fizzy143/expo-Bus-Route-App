@@ -14,7 +14,11 @@ import {
   type LocationAdapter,
   type LocationSubscription,
 } from './locationAdapter';
-import { acceptLocationSample, createLatestThrottle } from './locationPolicy';
+import {
+  acceptLocationSample,
+  createLatestThrottle,
+  getLocationRetryDelay,
+} from './locationPolicy';
 import {
   TRACKING_PROFILE,
   type ForegroundPermissionStatus,
@@ -90,8 +94,6 @@ export function createLocationPermissionSession(): LocationPermissionSession {
 
 const appLocationPermissionSession = createLocationPermissionSession();
 const LocationContext = createContext<UserLocationContextValue | undefined>(undefined);
-const RETRY_DELAYS = [1000, 2000, 5000] as const;
-
 type LocationProviderProps = React.PropsWithChildren<{
   adapter?: LocationAdapter;
   runtime?: LocationRuntime;
@@ -163,20 +165,18 @@ export function LocationProvider({
       const isCurrentAttempt = () =>
         !disposed && generation === generationRef.current;
 
-      const retry = (failure: unknown) => {
+      const scheduleRetry = (failure: unknown, failedAttempt: number) => {
         if (!isCurrentAttempt()) return;
 
         cleanupAttempt();
         setError(failure instanceof Error ? failure.message : String(failure));
         setStatus('degraded');
 
-        const delay = RETRY_DELAYS[attempt];
-        if (delay !== undefined) {
-          retryTimerRef.current = setTimeout(
-            () => void startAttempt(attempt + 1),
-            delay
-          );
-        }
+        const delay = getLocationRetryDelay(failedAttempt, trackingMode);
+        retryTimerRef.current = setTimeout(
+          () => void startAttempt(failedAttempt + 1),
+          delay
+        );
       };
 
       try {
@@ -223,7 +223,7 @@ export function LocationProvider({
         const subscription = await adapter.watchLocation(
           trackingMode,
           onLocation,
-          retry
+          failure => scheduleRetry(failure, 0)
         );
         if (!isCurrentAttempt()) {
           subscription.remove();
@@ -234,7 +234,7 @@ export function LocationProvider({
         setError(null);
         setStatus(snapshotRef.current.hasReliableLocation ? 'tracking' : 'degraded');
       } catch (failure) {
-        retry(failure);
+        scheduleRetry(failure, attempt);
       }
     };
 
