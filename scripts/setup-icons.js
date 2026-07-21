@@ -22,8 +22,7 @@ console.log('🔧 Setting up icons...\n');
 // 複製到根目錄（Metro 需要）
 const rootFiles = [
   { src: 'icon.png', dest: 'icon.png' },
-  { src: 'splash-icon.png', dest: 'splash.png' },
-  { src: 'adaptive-icon.png', dest: 'adaptive-icon.png' }
+  { src: 'splash-icon.png', dest: 'splash.png' }
 ];
 
 rootFiles.forEach(({ src, dest }) => {
