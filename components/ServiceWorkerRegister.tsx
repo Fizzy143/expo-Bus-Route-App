@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import { VERSION_METADATA } from '../constants/version';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const AUTO_UPDATE_DELAY_MS = 1200;
 
 interface VersionPayload {
   appVersion: string;
@@ -31,9 +32,9 @@ function postSkipWaiting(registration: ServiceWorkerRegistration | null) {
 
 export default function ServiceWorkerRegister() {
   const registrationRef = useRef<ServiceWorkerRegistration | null>(null);
+  const autoUpdateTriggeredRef = useRef(false);
   const [updateReady, setUpdateReady] = useState(false);
-  const [isUpdating, setIsUpdating] = useState(false);
-  const [updateDetail, setUpdateDetail] = useState('重新整理後就會切到最新版。');
+  const [updateDetail, setUpdateDetail] = useState('偵測到新版本，即將自動更新。');
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') {
@@ -54,7 +55,7 @@ export default function ServiceWorkerRegister() {
 
     const handleWaitingWorker = (registration: ServiceWorkerRegistration) => {
       registrationRef.current = registration;
-      setUpdateDetail('重新整理後就會切到最新版。');
+      setUpdateDetail('偵測到新版本，即將自動更新。');
       setUpdateReady(true);
     };
 
@@ -115,7 +116,7 @@ export default function ServiceWorkerRegister() {
               remoteVersion.buildId !== VERSION_METADATA.buildId
             ) {
               setUpdateDetail(
-                `目前版本 ${VERSION_METADATA.appVersion}，伺服器已有較新版本可更新。`
+                `目前版本 ${VERSION_METADATA.appVersion}，伺服器已有較新版本，即將自動更新。`
               );
               setUpdateReady(true);
             }
@@ -179,23 +180,36 @@ export default function ServiceWorkerRegister() {
     };
   }, []);
 
-  const handleApplyUpdate = async () => {
-    setIsUpdating(true);
-    const registration = registrationRef.current;
-
-    if (registration?.waiting) {
-      postSkipWaiting(registration);
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') {
       return;
     }
 
-    try {
-      await registration?.update();
-    } catch (error) {
-      console.error('[SW] Manual update failed:', error);
+    if (!updateReady || autoUpdateTriggeredRef.current) {
+      return;
     }
 
-    window.location.reload();
-  };
+    autoUpdateTriggeredRef.current = true;
+
+    const timeoutId = window.setTimeout(async () => {
+      const registration = registrationRef.current;
+
+      if (registration?.waiting) {
+        postSkipWaiting(registration);
+        return;
+      }
+
+      try {
+        await registration?.update();
+      } catch (error) {
+        console.error('[SW] Auto update failed:', error);
+      }
+
+      window.location.reload();
+    }, AUTO_UPDATE_DELAY_MS);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [updateReady]);
 
   if (Platform.OS !== 'web' || !updateReady) {
     return null;
@@ -205,19 +219,11 @@ export default function ServiceWorkerRegister() {
     <View style={styles.container}>
       <View style={styles.banner}>
         <View style={styles.textContainer}>
-          <Text style={styles.title}>有新版本可用</Text>
+          <Text style={styles.title}>正在更新</Text>
           <Text style={styles.description}>
-            更新不會清除你儲存在本機的常用路線，{updateDetail}
+            {updateDetail}更新不會清除你儲存在本機的常用路線。
           </Text>
         </View>
-        <TouchableOpacity
-          style={[styles.button, isUpdating && styles.buttonDisabled]}
-          onPress={handleApplyUpdate}
-          disabled={isUpdating}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.buttonText}>{isUpdating ? '更新中...' : '立即更新'}</Text>
-        </TouchableOpacity>
       </View>
     </View>
   );
@@ -254,19 +260,5 @@ const styles = StyleSheet.create({
     color: '#314243',
     fontSize: 12,
     lineHeight: 18,
-  },
-  button: {
-    backgroundColor: '#152021',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-  },
-  buttonDisabled: {
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
   },
 });
