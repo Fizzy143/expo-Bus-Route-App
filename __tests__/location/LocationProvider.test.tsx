@@ -47,6 +47,64 @@ describe('LocationProvider', () => {
     expect(fake.adapter.requestPermission).toHaveBeenCalledTimes(1);
   });
 
+  it('retries the permission request after a transient rejection', async () => {
+    const fake = createFakeLocationAdapter({
+      permission: 'undetermined',
+      requestPermission: 'granted',
+    });
+    (fake.adapter.requestPermission as jest.Mock).mockRejectedValueOnce(
+      new Error('transient auth error')
+    );
+    const runtime = createFakeRuntime();
+
+    const { result } = await renderHook(() => useUserLocation(), {
+      wrapper: makeWrapper(fake.adapter, runtime.runtime),
+    });
+
+    await waitFor(() => expect(result.current.status).toBe('degraded'));
+    expect(fake.adapter.requestPermission).toHaveBeenCalledTimes(1);
+
+    await act(() => result.current.refresh());
+
+    await waitFor(() =>
+      expect(fake.adapter.requestPermission).toHaveBeenCalledTimes(2)
+    );
+    await waitFor(() =>
+      expect(fake.adapter.watchLocation).toHaveBeenCalledTimes(1)
+    );
+    expect(result.current.permissionStatus).toBe('granted');
+    expect(result.current.status).toBe('tracking');
+  });
+
+  it('deduplicates concurrent in-flight permission requests', async () => {
+    const fake = createFakeLocationAdapter({
+      permission: 'undetermined',
+      requestPermission: 'granted',
+    });
+    let resolveRequest!: (status: 'granted') => void;
+    (fake.adapter.requestPermission as jest.Mock).mockImplementationOnce(
+      () =>
+        new Promise<'granted'>((resolve) => {
+          resolveRequest = resolve;
+        })
+    );
+    const session = createLocationPermissionSession();
+
+    const first = session.resolve(fake.adapter);
+    const second = session.resolve(fake.adapter);
+
+    await waitFor(() =>
+      expect(fake.adapter.requestPermission).toHaveBeenCalledTimes(1)
+    );
+    resolveRequest('granted');
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'granted',
+      'granted',
+    ]);
+    expect(fake.adapter.requestPermission).toHaveBeenCalledTimes(1);
+  });
+
   it('replaces standard with trip without leaving two active watches', async () => {
     const fake = createFakeLocationAdapter();
     const runtime = createFakeRuntime();

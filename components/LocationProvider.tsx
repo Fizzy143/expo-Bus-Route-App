@@ -84,7 +84,11 @@ export function createLocationPermissionSession(): LocationPermissionSession {
 
       if (!requestStarted) {
         requestStarted = true;
-        requestPromise = adapter.requestPermission();
+        requestPromise = adapter.requestPermission().catch((error) => {
+          requestStarted = false;
+          requestPromise = null;
+          throw error;
+        });
       }
 
       return requestPromise!;
