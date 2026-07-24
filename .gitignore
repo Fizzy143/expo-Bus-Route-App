@@ -39,6 +39,9 @@ yarn-error.*
 .env*.local
 AppData/
 
+# local planning scratch (not version-controlled)
+docs/superpowers/plans/
+
 # typescript
 *.tsbuildinfo
 
